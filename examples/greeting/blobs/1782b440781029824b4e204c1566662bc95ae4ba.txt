@@ -1,0 +1,7 @@
+{
+  "name": "greeting-example",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  }
+}

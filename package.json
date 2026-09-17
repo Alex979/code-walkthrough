@@ -1,0 +1,12 @@
+{
+  "name": "code-walkthrough",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "test": "bun test",
+    "validate": "bun scripts/validate.ts"
+  },
+  "engines": { "bun": ">=1.3.0" }
+}

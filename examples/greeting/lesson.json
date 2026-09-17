@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "title": "Trim names and give blank greetings a friendly fallback",
+  "steps": [
+    {
+      "id": "baseline",
+      "title": "The greeting includes every space in the supplied name",
+      "file": "greet.ts",
+      "version": "base",
+      "focus": [
+        1,
+        3
+      ],
+      "paragraphs": [
+        [
+          "Calling greet(\" Ada \") currently produces \"Hello,  Ada !\" because ",
+          {
+            "label": "greet inserts the name as supplied",
+            "path": "greet.ts",
+            "start": 1,
+            "end": 3,
+            "version": "base"
+          },
+          ". The change removes surrounding spaces to produce \"Hello, Ada!\" and uses \"Hello, friend!\" when the name is blank."
+        ],
+        [
+          "Callers already pass a name to ",
+          {
+            "label": "greet",
+            "path": "greet.ts",
+            "start": 1,
+            "end": 3,
+            "version": "base"
+          },
+          " and receive a complete greeting. Cleaning up the name inside that call lets them keep using the function in the same way."
+        ]
+      ]
+    },
+    {
+      "id": "name-policy",
+      "title": "Trim the name and use “friend” when it is blank",
+      "file": "name.ts",
+      "version": "step",
+      "focus": [
+        1,
+        3
+      ],
+      "changes": {
+        "name.ts": {
+          "use": "head"
+        }
+      },
+      "paragraphs": [
+        [
+          "The new ",
+          {
+            "label": "displayName helper",
+            "path": "name.ts",
+            "start": 1,
+            "end": 3,
+            "version": "step"
+          },
+          " trims surrounding spaces before choosing a fallback. That order matters: an all-space name becomes an empty string, so the helper returns \"friend\". Spaces between words remain, preserving names such as \"Mary Ann\"."
+        ],
+        [
+          "Keeping this work in ",
+          {
+            "label": "a separate function",
+            "path": "name.ts",
+            "start": 1,
+            "end": 3,
+            "version": "step"
+          },
+          " lets the greeting code ask for a display name without handling the cleanup itself. Putting the expression directly in greet would keep this small change in one file; the helper instead gives the operation a name, at the cost of another function to follow."
+        ],
+        [
+          {
+            "label": "greet still inserts the original name",
+            "path": "greet.ts",
+            "start": 1,
+            "end": 3,
+            "version": "step"
+          },
+          ". It needs to call the helper before callers see the new behavior."
+        ]
+      ]
+    },
+    {
+      "id": "greeting-integration",
+      "title": "Use the cleaned name in the greeting",
+      "file": "greet.ts",
+      "version": "step",
+      "focus": [
+        1,
+        5
+      ],
+      "changes": {
+        "greet.ts": {
+          "use": "head"
+        }
+      },
+      "paragraphs": [
+        [
+          {
+            "label": "greet now calls displayName",
+            "path": "greet.ts",
+            "start": 1,
+            "end": 4,
+            "version": "step"
+          },
+          " between \"Hello, \" and \"!\". The helper handles the name, while greet still assembles the complete message."
+        ],
+        [
+          "For \" Ada \", ",
+          {
+            "label": "displayName",
+            "path": "name.ts",
+            "start": 1,
+            "end": 3,
+            "version": "step"
+          },
+          " returns \"Ada\", giving \"Hello, Ada!\". For an all-space name it returns \"friend\", giving \"Hello, friend!\". Callers get both behaviors without cleaning up names themselves."
+        ]
+      ]
+    },
+    {
+      "id": "regression-coverage",
+      "title": "Test the greetings callers receive",
+      "file": "greet.test.ts",
+      "version": "step",
+      "focus": [
+        1,
+        8
+      ],
+      "changes": {
+        "greet.test.ts": {
+          "use": "head"
+        }
+      },
+      "paragraphs": [
+        [
+          "The test ",
+          {
+            "label": "calls greet",
+            "path": "greet.test.ts",
+            "start": 4,
+            "end": 8,
+            "version": "step"
+          },
+          " with surrounding spaces, an all-space name, and \"Mary Ann\". Checking the full messages confirms that the helper is connected to greet, that blank names get the fallback, and that spaces within a name remain."
+        ],
+        [
+          "Testing ",
+          {
+            "label": "greet rather than the helper alone",
+            "path": "greet.test.ts",
+            "start": 2,
+            "end": 8,
+            "version": "step"
+          },
+          " would catch a missing helper call even if displayName worked correctly on its own. The existing ",
+          {
+            "label": "bun test command",
+            "path": "package.json",
+            "start": 4,
+            "end": 6,
+            "version": "step"
+          },
+          " runs these checks."
+        ]
+      ]
+    }
+  ]
+}

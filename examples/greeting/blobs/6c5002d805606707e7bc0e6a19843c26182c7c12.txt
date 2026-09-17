@@ -1,0 +1,5 @@
+import { displayName } from "./name";
+
+export function greet(name: string): string {
+  return "Hello, " + displayName(name) + "!";
+}

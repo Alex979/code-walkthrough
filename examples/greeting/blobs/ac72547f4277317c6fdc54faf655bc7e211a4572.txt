@@ -1,0 +1,8 @@
+import { expect, test } from "bun:test";
+import { greet } from "./greet";
+
+test("trims names and handles a blank name", () => {
+  expect(greet(" Ada ")).toBe("Hello, Ada!");
+  expect(greet("   ")).toBe("Hello, friend!");
+  expect(greet("Mary Ann")).toBe("Hello, Mary Ann!");
+});

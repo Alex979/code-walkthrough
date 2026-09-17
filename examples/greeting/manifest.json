@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "repo": "greeting-example",
+  "base": "34f03fe9bfd9265c0e50b9864c9117980ac56d37",
+  "head": "af84c20552843282d5acaab5a0de73322fe3382a",
+  "scope": {
+    "objectFormat": "sha1",
+    "textLimitBytes": 2097152,
+    "kind": "branch",
+    "baseRef": "main",
+    "headRef": "trim-names",
+    "baseRevision": "34f03fe9bfd9265c0e50b9864c9117980ac56d37",
+    "headRevision": "af84c20552843282d5acaab5a0de73322fe3382a",
+    "mergeBase": "34f03fe9bfd9265c0e50b9864c9117980ac56d37",
+    "comparison": "merge-base-to-head",
+    "capturedAt": "2026-09-17T03:49:29.679Z",
+    "unavailable": []
+  },
+  "files": [
+    {
+      "path": "greet.test.ts",
+      "head": {
+        "oid": "ac72547f4277317c6fdc54faf655bc7e211a4572",
+        "size": 279,
+        "kind": "text",
+        "mode": "100644"
+      },
+      "status": "A"
+    },
+    {
+      "path": "greet.ts",
+      "base": {
+        "oid": "37c1c8280d40adfa1728af1b6629f49d3f82a2bf",
+        "size": 81,
+        "kind": "text",
+        "mode": "100644"
+      },
+      "head": {
+        "oid": "6c5002d805606707e7bc0e6a19843c26182c7c12",
+        "size": 133,
+        "kind": "text",
+        "mode": "100644"
+      },
+      "status": "M"
+    },
+    {
+      "path": "name.ts",
+      "head": {
+        "oid": "268a16250738748a90c4ca9b72c56100058fcd00",
+        "size": 88,
+        "kind": "text",
+        "mode": "100644"
+      },
+      "status": "A"
+    },
+    {
+      "path": "package.json",
+      "base": {
+        "oid": "1782b440781029824b4e204c1566662bc95ae4ba",
+        "size": 95,
+        "kind": "text",
+        "mode": "100644"
+      },
+      "head": {
+        "oid": "1782b440781029824b4e204c1566662bc95ae4ba",
+        "size": 95,
+        "kind": "text",
+        "mode": "100644"
+      },
+      "status": ""
+    }
+  ]
+}
