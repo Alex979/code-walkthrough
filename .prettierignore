@@ -1,0 +1,8 @@
+# Generated output is rebuilt from the maintained viewer source.
+skills/code-walkthrough/assets/
+
+# Captured example bytes must keep their recorded identities.
+skills/code-walkthrough/examples/
+
+# Managed by Bun.
+bun.lock

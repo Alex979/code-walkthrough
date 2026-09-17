@@ -3,34 +3,74 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validate, ValidationError } from "../scripts/validate";
-import type { BlobInfo, FileInfo, Lesson, Manifest, Step } from "../viewer/src/types";
+import { validate, ValidationError } from "../skills/code-walkthrough/scripts/validate";
+import type {
+  BlobInfo,
+  FileInfo,
+  Lesson,
+  Manifest,
+  Step,
+} from "../skills/code-walkthrough/scripts/types";
 
 const directories: string[] = [];
 afterEach(async () => {
-  for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
+  for (const directory of directories.splice(0)) {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 function step(overrides: Partial<Step> = {}): Step {
-  return { id: "finish", title: "Finish the change", file: "main.ts", paragraphs: [["Explanation."]], changes: { "main.ts": { use: "head" } }, ...overrides };
+  return {
+    id: "finish",
+    title: "Finish the change",
+    file: "main.ts",
+    paragraphs: [["Explanation."]],
+    changes: { "main.ts": { use: "head" } },
+    ...overrides,
+  };
 }
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "walkthrough-validator-"));
   directories.push(dir);
   await mkdir(join(dir, "blobs"));
-  const manifest: Manifest = { schemaVersion: 1, repo: "fixture", base: "base-ref", head: "head-ref", files: [] };
+  const manifest: Manifest = {
+    schemaVersion: 1,
+    repo: "fixture",
+    base: "base-ref",
+    head: "head-ref",
+    files: [],
+  };
   const lesson: Lesson = { schemaVersion: 1, title: "A walkthrough", steps: [step()] };
-  async function blob(source: string | Buffer, algorithm: "sha1" | "sha256" = "sha1", mode: string | undefined = "100644"): Promise<BlobInfo> {
+  async function blob(
+    source: string | Buffer,
+    algorithm: "sha1" | "sha256" = "sha1",
+    mode: string | undefined = "100644",
+  ): Promise<BlobInfo> {
     const bytes = Buffer.isBuffer(source) ? source : Buffer.from(source, "utf8");
     const oid = createHash(algorithm).update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
     await writeFile(join(dir, "blobs", `${oid}.txt`), bytes);
     return { oid, size: bytes.length, kind: "text", ...(mode === undefined ? {} : { mode }) };
   }
-  async function file(path: string, base?: string | BlobInfo, head?: string | BlobInfo): Promise<FileInfo> {
-    const info: FileInfo = { path, status: base === undefined ? "A" : head === undefined ? "D" : "M" };
-    if (base !== undefined) info.base = typeof base === "string" ? await blob(base) : base;
-    if (head !== undefined) info.head = typeof head === "string" ? await blob(head) : head;
+  async function file(
+    path: string,
+    base?: string | BlobInfo,
+    head?: string | BlobInfo,
+  ): Promise<FileInfo> {
+    let status: FileInfo["status"] = "M";
+    if (base === undefined) {
+      status = "A";
+    } else if (head === undefined) {
+      status = "D";
+    }
+
+    const info: FileInfo = { path, status };
+    if (base !== undefined) {
+      info.base = typeof base === "string" ? await blob(base) : base;
+    }
+    if (head !== undefined) {
+      info.head = typeof head === "string" ? await blob(head) : head;
+    }
     manifest.files.push(info);
     return info;
   }
@@ -38,7 +78,10 @@ async function fixture() {
     await writeFile(join(dir, "manifest.json"), JSON.stringify(manifest));
     await writeFile(join(dir, "lesson.json"), JSON.stringify(lesson));
   }
-  async function run() { await save(); return validate(dir); }
+  async function run() {
+    await save();
+    return validate(dir);
+  }
   await file("main.ts", "const answer = 1;\n", "const answer = 2;\n");
   return { dir, manifest, lesson, blob, file, save, run };
 }
@@ -47,11 +90,18 @@ function opaque(kind: "binary" | "large" | "unavailable", digit = "a", mode = "1
   return { oid: digit.repeat(40), size: 42, kind, mode };
 }
 
-async function problems(run: () => Promise<unknown>, ...messages: string[]): Promise<ValidationError> {
-  try { await run(); } catch (error) {
+async function problems(
+  run: () => Promise<unknown>,
+  ...messages: string[]
+): Promise<ValidationError> {
+  try {
+    await run();
+  } catch (error) {
     expect(error).toBeInstanceOf(ValidationError);
     const failure = error as ValidationError;
-    for (const message of messages) expect(failure.message).toContain(message);
+    for (const message of messages) {
+      expect(failure.message).toContain(message);
+    }
     expect(failure.problems.length).toBeGreaterThan(0);
     return failure;
   }
@@ -82,9 +132,21 @@ describe("validator API and cumulative identity", () => {
     await f.file("new.ts", undefined, "export const added = 2;\n");
     f.lesson.steps = [
       step({ id: "base", changes: {}, symbol: "answer = 1" }),
-      step({ id: "partial", file: "new.ts", changes: { "new.ts": { text: "export const added = (" } }, symbol: "added" }),
-      step({ id: "persists", file: "new.ts", changes: {}, paragraphs: [[{ label: "Earlier partial file", path: "new.ts", start: 1 }]] }),
-      step({ changes: { "main.ts": { use: "head" }, "new.ts": { text: "export const added = 2;\n" } } }),
+      step({
+        id: "partial",
+        file: "new.ts",
+        changes: { "new.ts": { text: "export const added = (" } },
+        symbol: "added",
+      }),
+      step({
+        id: "persists",
+        file: "new.ts",
+        changes: {},
+        paragraphs: [[{ label: "Earlier partial file", path: "new.ts", start: 1 }]],
+      }),
+      step({
+        changes: { "main.ts": { use: "head" }, "new.ts": { text: "export const added = 2;\n" } },
+      }),
     ];
     expect((await f.run()).steps).toBe(4); // Invalid language syntax in intermediate steps is intentional.
   });
@@ -101,7 +163,11 @@ describe("validator API and cumulative identity", () => {
     await problems(f.run, "text differs from head bytes");
   });
 
-  for (const [name, actual] of [["CRLF normalization", "\uFEFFhello\n"], ["BOM removal", "hello\r\n"], ["trailing newline removal", "\uFEFFhello"]]) {
+  for (const [name, actual] of [
+    ["CRLF normalization", "\uFEFFhello\n"],
+    ["BOM removal", "hello\r\n"],
+    ["trailing newline removal", "\uFEFFhello"],
+  ]) {
     test(`rejects ${name} in final source`, async () => {
       const f = await fixture();
       f.manifest.files[0].head = await f.blob("\uFEFFhello\r\n");
@@ -122,7 +188,11 @@ describe("validator API and cumulative identity", () => {
     const f = await fixture();
     await f.file("added.ts", undefined, "added");
     await f.file("deleted.ts", "deleted", undefined);
-    await problems(f.run, 'final "added.ts": missing head file', 'final "deleted.ts": must be deleted');
+    await problems(
+      f.run,
+      'final "added.ts": missing head file',
+      'final "deleted.ts": must be deleted',
+    );
     Object.assign(f.lesson.steps[0].changes!, { "added.ts": { use: "head" }, "deleted.ts": null });
     expect((await f.run()).ok).toBe(true);
   });
@@ -132,7 +202,10 @@ describe("validator API and cumulative identity", () => {
     await f.file("gone.ts", "old", undefined);
     f.lesson.steps[0].changes!["gone.ts"] = { use: "head" };
     await problems(f.run, 'use:"head" requires a captured head');
-    f.lesson.steps = [step({ id: "delete", changes: { "gone.ts": null } }), step({ changes: { "main.ts": { use: "head" }, "gone.ts": null } })];
+    f.lesson.steps = [
+      step({ id: "delete", changes: { "gone.ts": null } }),
+      step({ changes: { "main.ts": { use: "head" }, "gone.ts": null } }),
+    ];
     expect((await f.run()).ok).toBe(true);
   });
 
@@ -140,13 +213,19 @@ describe("validator API and cumulative identity", () => {
     const f = await fixture();
     f.lesson.steps[0].changes!["typo.ts"] = null;
     f.lesson.steps[0].file = "not-in-manifest.ts";
-    await problems(f.run, 'changes["typo.ts"]: unknown manifest path', 'unknown manifest path "not-in-manifest.ts"');
+    await problems(
+      f.run,
+      'changes["typo.ts"]: unknown manifest path',
+      'unknown manifest path "not-in-manifest.ts"',
+    );
   });
 
   test("handles prototype-like repository paths without inherited properties", async () => {
     const f = await fixture();
     await f.file("__proto__", undefined, "safe");
-    f.lesson.steps[0].changes = JSON.parse('{"main.ts":{"use":"head"},"__proto__":{"text":"safe"}}');
+    f.lesson.steps[0].changes = JSON.parse(
+      '{"main.ts":{"use":"head"},"__proto__":{"text":"safe"}}',
+    );
     f.lesson.steps[0].file = "__proto__";
     expect((await f.run()).ok).toBe(true);
   });
@@ -171,7 +250,9 @@ describe("binary and mode metadata", () => {
       f.lesson.steps[0].focus = [1, 1];
       await problems(f.run, "placeholder has no source lines or symbols");
       delete f.lesson.steps[0].focus;
-      f.lesson.steps[0].paragraphs = [[{ label: "Bad asset anchor", path: "asset.bin", symbol: "magic" }]];
+      f.lesson.steps[0].paragraphs = [
+        [{ label: "Bad asset anchor", path: "asset.bin", symbol: "magic" }],
+      ];
       await problems(f.run, "placeholder has no source lines or symbols");
     });
   }
@@ -186,7 +267,10 @@ describe("binary and mode metadata", () => {
   test("textual sides permit intermediate text but cannot substitute for a binary head", async () => {
     const f = await fixture();
     await f.file("converted", "text before", opaque("binary"));
-    f.lesson.steps = [step({ id: "partial", changes: { converted: { text: "intermediate" } } }), step()];
+    f.lesson.steps = [
+      step({ id: "partial", changes: { converted: { text: "intermediate" } } }),
+      step(),
+    ];
     await problems(f.run, 'final "converted": snapshot kind/content differs');
     f.lesson.steps[1].changes!.converted = { use: "head" };
     expect((await f.run()).ok).toBe(true);
@@ -234,11 +318,13 @@ describe("selected versions, prose source links and focus", () => {
     f.lesson.steps[0].changes!["deleted.ts"] = null;
     f.lesson.steps[0].version = "base";
     f.lesson.steps[0].symbol = "answer = 1";
-    f.lesson.steps[0].paragraphs = [[
-      { label: "Before", path: "main.ts", version: "base", symbol: "answer = 1" },
-      { label: "After", path: "main.ts", version: "head", start: 1, end: 2 },
-      { label: "Deleted source", path: "deleted.ts", version: "base", start: 1 },
-    ]];
+    f.lesson.steps[0].paragraphs = [
+      [
+        { label: "Before", path: "main.ts", version: "base", symbol: "answer = 1" },
+        { label: "After", path: "main.ts", version: "head", start: 1, end: 2 },
+        { label: "Deleted source", path: "deleted.ts", version: "base", start: 1 },
+      ],
+    ];
     expect((await f.run()).ok).toBe(true);
   });
 
@@ -246,10 +332,18 @@ describe("selected versions, prose source links and focus", () => {
     const f = await fixture();
     await f.file("future.ts", undefined, "future");
     f.lesson.steps = [
-      step({ id: "early", file: "future.ts", paragraphs: [[{ label: "Too early", path: "future.ts" }]] }),
+      step({
+        id: "early",
+        file: "future.ts",
+        paragraphs: [[{ label: "Too early", path: "future.ts" }]],
+      }),
       step({ changes: { "future.ts": { use: "head" } } }),
     ];
-    await problems(f.run, '.file: "future.ts" does not exist in selected version "step"', '"Too early"): "future.ts" does not exist');
+    await problems(
+      f.run,
+      '.file: "future.ts" does not exist in selected version "step"',
+      '"Too early"): "future.ts" does not exist',
+    );
     f.lesson.steps[0].version = "head";
     f.lesson.steps[0].paragraphs = [[{ label: "Preview", path: "future.ts", version: "head" }]];
     expect((await f.run()).ok).toBe(true);
@@ -267,18 +361,27 @@ describe("selected versions, prose source links and focus", () => {
   test("reports unknown, missing and ambiguous source links without silent fallback", async () => {
     const f = await fixture();
     f.manifest.files[0].head = await f.blob("function repeated() {}\nrepeated();\nunique();");
-    f.lesson.steps[0].paragraphs = [[
-      { label: "Unknown", path: "wrong.ts" },
-      { label: "Missing", path: "main.ts", symbol: "absent" },
-      { label: "Ambiguous", path: "main.ts", symbol: "repeated" },
-    ]];
-    await problems(f.run, 'unknown manifest path "wrong.ts"', 'symbol "absent" was not found', 'symbol "repeated" is ambiguous (2 matching lines: 1, 2)');
+    f.lesson.steps[0].paragraphs = [
+      [
+        { label: "Unknown", path: "wrong.ts" },
+        { label: "Missing", path: "main.ts", symbol: "absent" },
+        { label: "Ambiguous", path: "main.ts", symbol: "repeated" },
+      ],
+    ];
+    await problems(
+      f.run,
+      'unknown manifest path "wrong.ts"',
+      'symbol "absent" was not found',
+      'symbol "repeated" is ambiguous (2 matching lines: 1, 2)',
+    );
   });
 
   test("checks both link and step line bounds in selected versions", async () => {
     const f = await fixture();
     f.lesson.steps[0].focus = [1, 3];
-    f.lesson.steps[0].paragraphs = [[{ label: "Out of bounds", path: "main.ts", version: "base", start: 3 }]];
+    f.lesson.steps[0].paragraphs = [
+      [{ label: "Out of bounds", path: "main.ts", version: "base", start: 3 }],
+    ];
     await problems(f.run, "line range 1-3 exceeds", "line range 3-3 exceeds", "base, 2 lines");
     f.lesson.steps[0].focus = [1, 2];
     f.lesson.steps[0].paragraphs = [[{ label: "Final empty line", path: "main.ts", start: 2 }]];
@@ -289,10 +392,14 @@ describe("selected versions, prose source links and focus", () => {
     const f = await fixture();
     f.lesson.steps[0].symbol = "answer";
     f.lesson.steps[0].count = 2;
-    f.lesson.steps[0].paragraphs = [[{ label: "Answer", path: "main.ts", symbol: "answer", count: 2 }]];
+    f.lesson.steps[0].paragraphs = [
+      [{ label: "Answer", path: "main.ts", symbol: "answer", count: 2 }],
+    ];
     expect((await f.run()).ok).toBe(true);
     f.lesson.steps[0].count = 3;
-    f.lesson.steps[0].paragraphs = [[{ label: "Too long", path: "main.ts", symbol: "answer", count: 3 }]];
+    f.lesson.steps[0].paragraphs = [
+      [{ label: "Too long", path: "main.ts", symbol: "answer", count: 3 }],
+    ];
     const failure = await problems(f.run, "line range 1-3 exceeds");
     expect(failure.problems).toHaveLength(2);
   });
@@ -350,11 +457,21 @@ describe("capture integrity and untrusted input", () => {
     await problems(f.run, "unpaired UTF-16 surrogate");
   });
 
-  for (const oid of ["../secret", "a".repeat(39), "a".repeat(41), "A".repeat(40), "../" + "a".repeat(40), "a".repeat(40) + "/../secret"]) {
+  for (const oid of [
+    "../secret",
+    "a".repeat(39),
+    "a".repeat(41),
+    "A".repeat(40),
+    "../" + "a".repeat(40),
+    "a".repeat(40) + "/../secret",
+  ]) {
     test(`rejects unsafe or malformed OID ${JSON.stringify(oid)}`, async () => {
       const f = await fixture();
       f.manifest.files[0].head!.oid = oid;
-      await problems(f.run, ".oid: expected a lowercase 40-character SHA-1 or 64-character SHA-256");
+      await problems(
+        f.run,
+        ".oid: expected a lowercase 40-character SHA-1 or 64-character SHA-256",
+      );
     });
   }
 
@@ -388,7 +505,11 @@ describe("capture integrity and untrusted input", () => {
     const f = await fixture();
     await writeFile(join(f.dir, "manifest.json"), "{");
     await writeFile(join(f.dir, "lesson.json"), "undefined");
-    const error = await problems(() => validate(f.dir), "manifest.json: cannot read valid UTF-8 JSON", "lesson.json: cannot read valid UTF-8 JSON");
+    const error = await problems(
+      () => validate(f.dir),
+      "manifest.json: cannot read valid UTF-8 JSON",
+      "lesson.json: cannot read valid UTF-8 JSON",
+    );
     expect(error.problems).toHaveLength(2);
   });
 
@@ -396,7 +517,11 @@ describe("capture integrity and untrusted input", () => {
     const f = await fixture();
     await writeFile(join(f.dir, "manifest.json"), "null");
     await writeFile(join(f.dir, "lesson.json"), "[]");
-    await problems(() => validate(f.dir), "manifest.json: expected an object", "lesson.json: expected an object");
+    await problems(
+      () => validate(f.dir),
+      "manifest.json: expected an object",
+      "lesson.json: expected an object",
+    );
     await rm(join(f.dir, "lesson.json"));
     await problems(() => validate(f.dir), "lesson.json: cannot read");
     await problems(() => validate(null as unknown as string), "expected a nonempty path string");
@@ -405,8 +530,20 @@ describe("capture integrity and untrusted input", () => {
   test("checks nonempty unique step IDs, titles and structured paragraphs", async () => {
     const f = await fixture();
     f.lesson.title = " ";
-    f.lesson.steps = [step({ id: "", title: "", paragraphs: [] }), step({ id: "same" }), step({ id: "same", paragraphs: [[" "]] })];
-    await problems(f.run, "lesson.title", ".id: expected a nonempty string", ".title: expected a nonempty string", ".paragraphs: expected", "duplicate step ID", "paragraph must contain");
+    f.lesson.steps = [
+      step({ id: "", title: "", paragraphs: [] }),
+      step({ id: "same" }),
+      step({ id: "same", paragraphs: [[" "]] }),
+    ];
+    await problems(
+      f.run,
+      "lesson.title",
+      ".id: expected a nonempty string",
+      ".title: expected a nonempty string",
+      ".paragraphs: expected",
+      "duplicate step ID",
+      "paragraph must contain",
+    );
   });
 
   test("rejects duplicate manifest paths and inconsistent status", async () => {
@@ -425,24 +562,110 @@ describe("capture integrity and untrusted input", () => {
     f.lesson.steps[0].paragraphs = [[{ label: "Link", path: "main.ts", typo: true } as never]];
     f.lesson.steps[0].changes!["main.ts"] = { use: "head", typo: true } as never;
     const failure = await problems(f.run, 'unknown key "typo"');
-    expect(failure.problems.filter(p => p.includes('unknown key "typo"'))).toHaveLength(7);
+    expect(failure.problems.filter((p) => p.includes('unknown key "typo"'))).toHaveLength(7);
   });
 
   for (const [name, mutation, message] of [
-    ["bad changes map", (s: Step) => { s.changes = [] as never; }, "expected an object mapping"],
-    ["bad change", (s: Step) => { s.changes = { "main.ts": { text: 5 } as never }; }, "expected exactly"],
-    ["mixed change", (s: Step) => { s.changes = { "main.ts": { text: "x", use: "head" } }; }, "expected exactly"],
-    ["bad version", (s: Step) => { s.version = "latest" as never; }, ".version: expected"],
-    ["fractional focus", (s: Step) => { s.focus = [1, 1.5]; }, ".focus: expected"],
-    ["reversed focus", (s: Step) => { s.focus = [2, 1]; }, ".focus: expected"],
-    ["zero count", (s: Step) => { s.symbol = "answer"; s.count = 0; }, ".count: expected"],
-    ["orphan count", (s: Step) => { s.count = 2; }, ".count: requires symbol"],
-    ["mixed anchors", (s: Step) => { s.focus = [1, 1]; s.symbol = "answer"; }, "choose either focus or symbol"],
-    ["orphan end", (s: Step) => { s.paragraphs = [[{ label: "Link", path: "main.ts", end: 2 }]]; }, ".end: requires start"],
-    ["reversed range", (s: Step) => { s.paragraphs = [[{ label: "Link", path: "main.ts", start: 2, end: 1 }]]; }, ".end: must be >= start"],
-    ["mixed link anchors", (s: Step) => { s.paragraphs = [[{ label: "Link", path: "main.ts", start: 1, symbol: "answer" }]]; }, "choose either start/end or symbol"],
-    ["bad paragraph", (s: Step) => { s.paragraphs = ["not an array"] as never; }, "expected a nonempty array of strings/source links"],
-    ["bad part", (s: Step) => { s.paragraphs = [[null]] as never; }, "expected a string or SourceLink"],
+    [
+      "bad changes map",
+      (s: Step) => {
+        s.changes = [] as never;
+      },
+      "expected an object mapping",
+    ],
+    [
+      "bad change",
+      (s: Step) => {
+        s.changes = { "main.ts": { text: 5 } as never };
+      },
+      "expected exactly",
+    ],
+    [
+      "mixed change",
+      (s: Step) => {
+        s.changes = { "main.ts": { text: "x", use: "head" } };
+      },
+      "expected exactly",
+    ],
+    [
+      "bad version",
+      (s: Step) => {
+        s.version = "latest" as never;
+      },
+      ".version: expected",
+    ],
+    [
+      "fractional focus",
+      (s: Step) => {
+        s.focus = [1, 1.5];
+      },
+      ".focus: expected",
+    ],
+    [
+      "reversed focus",
+      (s: Step) => {
+        s.focus = [2, 1];
+      },
+      ".focus: expected",
+    ],
+    [
+      "zero count",
+      (s: Step) => {
+        s.symbol = "answer";
+        s.count = 0;
+      },
+      ".count: expected",
+    ],
+    [
+      "orphan count",
+      (s: Step) => {
+        s.count = 2;
+      },
+      ".count: requires symbol",
+    ],
+    [
+      "mixed anchors",
+      (s: Step) => {
+        s.focus = [1, 1];
+        s.symbol = "answer";
+      },
+      "choose either focus or symbol",
+    ],
+    [
+      "orphan end",
+      (s: Step) => {
+        s.paragraphs = [[{ label: "Link", path: "main.ts", end: 2 }]];
+      },
+      ".end: requires start",
+    ],
+    [
+      "reversed range",
+      (s: Step) => {
+        s.paragraphs = [[{ label: "Link", path: "main.ts", start: 2, end: 1 }]];
+      },
+      ".end: must be >= start",
+    ],
+    [
+      "mixed link anchors",
+      (s: Step) => {
+        s.paragraphs = [[{ label: "Link", path: "main.ts", start: 1, symbol: "answer" }]];
+      },
+      "choose either start/end or symbol",
+    ],
+    [
+      "bad paragraph",
+      (s: Step) => {
+        s.paragraphs = ["not an array"] as never;
+      },
+      "expected a nonempty array of strings/source links",
+    ],
+    [
+      "bad part",
+      (s: Step) => {
+        s.paragraphs = [[null]] as never;
+      },
+      "expected a string or SourceLink",
+    ],
   ] as const) {
     test(`rejects ${name}`, async () => {
       const f = await fixture();

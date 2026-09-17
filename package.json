@@ -4,9 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "bun run format:check && bun run build && bun test",
     "build": "bun scripts/build.ts",
     "test": "bun test",
-    "validate": "bun scripts/validate.ts"
+    "validate": "bun skills/code-walkthrough/scripts/validate.ts"
   },
-  "engines": { "bun": ">=1.3.0" }
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "devDependencies": {
+    "prettier": "3.9.7"
+  }
 }

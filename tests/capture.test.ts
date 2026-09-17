@@ -5,8 +5,12 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { capture, parseArgs, type CaptureOptions } from "../scripts/capture";
-import type { FileInfo, Manifest } from "../viewer/src/types";
+import {
+  capture,
+  parseArgs,
+  type CaptureOptions,
+} from "../skills/code-walkthrough/scripts/capture";
+import type { FileInfo, Manifest } from "../skills/code-walkthrough/scripts/types";
 
 const temporary: string[] = [];
 const environment = {
@@ -22,10 +26,18 @@ const environment = {
 
 function run(exe: string, args: string[], cwd: string, input?: Buffer | string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const child = execFile(exe, args, { cwd, env: environment, encoding: "buffer", maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
-      if (error) reject(new Error(`${exe} ${args.join(" ")}: ${stderr.toString() || error.message}`));
-      else resolve(stdout);
-    });
+    const child = execFile(
+      exe,
+      args,
+      { cwd, env: environment, encoding: "buffer", maxBuffer: 32 * 1024 * 1024, windowsHide: true },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`${exe} ${args.join(" ")}: ${stderr.toString() || error.message}`));
+        } else {
+          resolve(stdout);
+        }
+      },
+    );
     child.stdin?.on("error", () => {});
     child.stdin?.end(input);
   });
@@ -54,43 +66,64 @@ async function fixture(format: "sha1" | "sha256" = "sha1") {
   };
   let serial = 0;
   const output = () => path.join(root, `capture-${++serial}`);
-  const snap = (opts: Omit<CaptureOptions, "repo" | "out">, out = output()) => capture({ repo, out, ...opts });
+  const snap = (opts: Omit<CaptureOptions, "repo" | "out">, out = output()) =>
+    capture({ repo, out, ...opts });
   return { root, repo, git, put, commit, output, snap };
 }
 
 afterEach(async () => {
   for (const root of temporary.splice(0)) {
     // Only delete a validated, known mkdtemp child of the OS temporary directory.
-    if (path.dirname(root) !== os.tmpdir() || !path.basename(root).startsWith("walkthrough-capture-")) throw new Error("Unsafe test cleanup path");
+    if (
+      path.dirname(root) !== os.tmpdir() ||
+      !path.basename(root).startsWith("walkthrough-capture-")
+    ) {
+      throw new Error("Unsafe test cleanup path");
+    }
     await fs.rm(root, { recursive: true, force: true, maxRetries: 4, retryDelay: 50 });
   }
 });
 
 function file(manifest: Manifest, name: string): FileInfo {
-  const result = manifest.files.find(entry => entry.path === name);
-  if (!result) throw new Error(`No captured file ${JSON.stringify(name)}`);
+  const result = manifest.files.find((entry) => entry.path === name);
+  if (!result) {
+    throw new Error(`No captured file ${JSON.stringify(name)}`);
+  }
   return result;
 }
 
 function blobOid(bytes: Buffer, algorithm = "sha1") {
-  return createHash(algorithm).update(Buffer.from(`blob ${bytes.length}\0`)).update(bytes).digest("hex");
+  return createHash(algorithm)
+    .update(Buffer.from(`blob ${bytes.length}\0`))
+    .update(bytes)
+    .digest("hex");
 }
 
 async function assertStored(out: string, info: FileInfo["head"], content: Buffer | string) {
   expect(info?.kind).toBe("text");
-  expect(await fs.readFile(path.join(out, "blobs", `${info!.oid}.txt`))).toEqual(Buffer.from(content));
+  expect(await fs.readFile(path.join(out, "blobs", `${info!.oid}.txt`))).toEqual(
+    Buffer.from(content),
+  );
 }
 
 /** Fingerprint actual Git files, not `git status`, which can refresh the index. */
 async function inventory(directory: string): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
   const visit = async (current: string, prefix: string) => {
-    for (const entry of (await fs.readdir(current, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const entry of (await fs.readdir(current, { withFileTypes: true })).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
       const name = prefix ? `${prefix}/${entry.name}` : entry.name;
       const target = path.join(current, entry.name);
-      if (entry.isDirectory()) await visit(target, name);
-      else if (entry.isSymbolicLink()) result[name] = `link:${await fs.readlink(target)}`;
-      else result[name] = createHash("sha256").update(await fs.readFile(target)).digest("hex");
+      if (entry.isDirectory()) {
+        await visit(target, name);
+      } else if (entry.isSymbolicLink()) {
+        result[name] = `link:${await fs.readlink(target)}`;
+      } else {
+        result[name] = createHash("sha256")
+          .update(await fs.readFile(target))
+          .digest("hex");
+      }
     }
   };
   await visit(directory, "");
@@ -107,10 +140,17 @@ describe("revision scopes", () => {
     expect(manifest.schemaVersion).toBe(1);
     expect(manifest.head).toBe(root);
     expect(manifest.base).toBe(await f.git("hash-object", "-t", "tree", "--stdin"));
-    expect(manifest.scope).toMatchObject({ kind: "commit", emptyBase: true, baseRevision: null, headRevision: root });
+    expect(manifest.scope).toMatchObject({
+      kind: "commit",
+      emptyBase: true,
+      baseRevision: null,
+      headRevision: root,
+    });
     expect(file(manifest, "hello.ts").status).toBe("A");
     await assertStored(out, file(manifest, "hello.ts").head, "export const hello = 'world';\n");
-    expect(JSON.parse(await fs.readFile(path.join(out, "manifest.json"), "utf8"))).toEqual(manifest);
+    expect(JSON.parse(await fs.readFile(path.join(out, "manifest.json"), "utf8"))).toEqual(
+      manifest,
+    );
     await f.put("hello.ts", "later edits");
     await assertStored(out, file(manifest, "hello.ts").head, "export const hello = 'world';\n");
   });
@@ -132,10 +172,16 @@ describe("revision scopes", () => {
     const out = f.output();
     const manifest = await f.snap({ commit: head }, out);
     expect(manifest.base).toBe(base);
-    expect(manifest.files.map(entry => [entry.path, entry.status])).toEqual([
-      ["added.txt", "A"], ["change.txt", "M"], ["context.txt", ""], ["delete.txt", "D"], ["executable.sh", "M"],
+    expect(manifest.files.map((entry) => [entry.path, entry.status])).toEqual([
+      ["added.txt", "A"],
+      ["change.txt", "M"],
+      ["context.txt", ""],
+      ["delete.txt", "D"],
+      ["executable.sh", "M"],
     ]);
-    expect(file(manifest, "executable.sh").base?.oid).toBe(file(manifest, "executable.sh").head?.oid);
+    expect(file(manifest, "executable.sh").base?.oid).toBe(
+      file(manifest, "executable.sh").head?.oid,
+    );
     expect(file(manifest, "executable.sh").head?.mode).toBe("100755");
     await assertStored(out, file(manifest, "change.txt").base, "before");
     await assertStored(out, file(manifest, "change.txt").head, "after");
@@ -157,12 +203,16 @@ describe("revision scopes", () => {
     const twoDot = await f.snap({ range: "main..feature" });
     expect(branch.base).toBe(ancestor);
     expect(branch.head).toBe(feature);
-    expect(branch.scope).toMatchObject({ baseRevision: main, headRevision: feature, mergeBase: ancestor });
+    expect(branch.scope).toMatchObject({
+      baseRevision: main,
+      headRevision: feature,
+      mergeBase: ancestor,
+    });
     expect(threeDot.base).toBe(ancestor);
     expect(threeDot.files).toEqual(branch.files);
     expect(twoDot.base).toBe(main);
     expect(file(twoDot, "main-only.txt").status).toBe("D");
-    expect(branch.files.some(entry => entry.path === "main-only.txt")).toBe(false);
+    expect(branch.files.some((entry) => entry.path === "main-only.txt")).toBe(false);
   });
 
   test("merge commit compares to its first parent", async () => {
@@ -196,25 +246,61 @@ describe("revision scopes", () => {
     const before = await inventory(f.repo);
     const url = "https://github.example/org/repo/pull/42";
     for (const requested of [url, 42]) {
-      const manifest = await capture({ repo: f.repo, out: f.output(), pr: requested }, {
-        gh: async (args, cwd) => {
-          expect(cwd).toBe(await fs.realpath(f.repo));
-          expect(args.slice(0, 4)).toEqual(["pr", "view", String(requested), "--json"]);
-          return JSON.stringify({ number: 42, url, title: "PR title", baseRefName: "main", headRefName: "topic", baseRefOid, headRefOid });
+      const manifest = await capture(
+        { repo: f.repo, out: f.output(), pr: requested },
+        {
+          gh: async (args, cwd) => {
+            expect(cwd).toBe(await fs.realpath(f.repo));
+            expect(args.slice(0, 4)).toEqual(["pr", "view", String(requested), "--json"]);
+            return JSON.stringify({
+              number: 42,
+              url,
+              title: "PR title",
+              baseRefName: "main",
+              headRefName: "topic",
+              baseRefOid,
+              headRefOid,
+            });
+          },
         },
-      });
+      );
       expect(manifest.base).toBe(ancestor);
       expect(manifest.head).toBe(headRefOid);
       expect(manifest.sourceUrl).toBe(url);
-      expect(manifest.scope).toMatchObject({ kind: "pr", baseRevision: baseRefOid, headRevision: headRefOid, mergeBase: ancestor });
+      expect(manifest.scope).toMatchObject({
+        kind: "pr",
+        baseRevision: baseRefOid,
+        headRevision: headRefOid,
+        mergeBase: ancestor,
+      });
     }
     expect(await inventory(f.repo)).toEqual(before);
-    await expect(capture({ repo: f.repo, out: f.output(), pr: 42 }, {
-      gh: async () => JSON.stringify({ number: 42, url, baseRefName: "main", headRefName: "topic", baseRefOid, headRefOid: "f".repeat(40) }),
-    })).rejects.toThrow("git fetch <verified-base-remote>");
-    await expect(capture({ repo: f.repo, out: f.output(), pr: 42 }, {
-      gh: async () => { throw new Error("not authenticated"); },
-    })).rejects.toThrow("Authenticated PR resolution through gh failed");
+    await expect(
+      capture(
+        { repo: f.repo, out: f.output(), pr: 42 },
+        {
+          gh: async () =>
+            JSON.stringify({
+              number: 42,
+              url,
+              baseRefName: "main",
+              headRefName: "topic",
+              baseRefOid,
+              headRefOid: "f".repeat(40),
+            }),
+        },
+      ),
+    ).rejects.toThrow("git fetch <verified-base-remote>");
+    await expect(
+      capture(
+        { repo: f.repo, out: f.output(), pr: 42 },
+        {
+          gh: async () => {
+            throw new Error("not authenticated");
+          },
+        },
+      ),
+    ).rejects.toThrow("Authenticated PR resolution through gh failed");
     expect(await inventory(f.repo)).toEqual(before);
   });
 
@@ -236,7 +322,9 @@ describe("dirty snapshots", () => {
   test("default captures raw working bytes and nonignored untracked; staged captures index only", async () => {
     const f = await fixture();
     await f.put(".gitignore", "ignored*\n");
-    for (const name of ["both.txt", "deleted.txt", "staged-deleted.txt", "context.txt"]) await f.put(name, "HEAD\n");
+    for (const name of ["both.txt", "deleted.txt", "staged-deleted.txt", "context.txt"]) {
+      await f.put(name, "HEAD\n");
+    }
     await f.put("ignored-tracked.txt", "tracked despite ignore\n");
     await f.git("add", "--force", "ignored-tracked.txt");
     const head = await f.commit("base");
@@ -257,7 +345,12 @@ describe("dirty snapshots", () => {
     const staged = await f.snap({ uncommitted: true, staged: true }, stagedOut);
     expect(dirty.base).toBe(head);
     expect(dirty.head).toBe("working-tree");
-    expect(dirty.scope).toMatchObject({ includesUntracked: true, staged: false, headRevision: null, baseRevision: head });
+    expect(dirty.scope).toMatchObject({
+      includesUntracked: true,
+      staged: false,
+      headRevision: null,
+      baseRevision: head,
+    });
     await assertStored(out, file(dirty, "both.txt").head, "working\r\n");
     await assertStored(stagedOut, file(staged, "both.txt").head, "index\n");
     await assertStored(out, file(dirty, "staged-add.txt").head, "working addition\n");
@@ -268,8 +361,8 @@ describe("dirty snapshots", () => {
     expect(file(staged, "staged-deleted.txt").status).toBe("D");
     expect(file(dirty, "untracked.txt").status).toBe("A");
     expect(file(dirty, "ignored-tracked.txt").status).toBe("M");
-    expect(dirty.files.some(entry => entry.path === "ignored-secret.txt")).toBe(false);
-    expect(staged.files.some(entry => entry.path === "untracked.txt")).toBe(false);
+    expect(dirty.files.some((entry) => entry.path === "ignored-secret.txt")).toBe(false);
+    expect(staged.files.some((entry) => entry.path === "untracked.txt")).toBe(false);
     expect(staged.scope).toMatchObject({ source: "index", staged: true, includesUntracked: false });
     expect(await inventory(f.repo)).toEqual(before);
   });
@@ -286,57 +379,81 @@ describe("dirty snapshots", () => {
     const info = file(manifest, "bytes.txt").head!;
     expect(info.oid).toBe(blobOid(bytes));
     expect(info.size).toBe(bytes.length);
-    expect(info.oid).toBe((await run("git", ["hash-object", "--no-filters", "--stdin"], f.repo, bytes)).toString().trim());
+    expect(info.oid).toBe(
+      (await run("git", ["hash-object", "--no-filters", "--stdin"], f.repo, bytes))
+        .toString()
+        .trim(),
+    );
     await assertStored(out, info, bytes);
   });
 
-  test.each(["true", "input"])("autocrlf=%s ignores checkout-only CRLF, captures real changes and respects -text without filters", async (setting) => {
-    const f = await fixture();
-    await f.git("config", "core.autocrlf", setting);
-    await f.put(".gitattributes", "*.txt filter=tripwire\nraw.txt -text\n");
-    await f.put("clean.txt", "clean\n");
-    await f.put("changed.txt", "before\n");
-    await f.put("raw.txt", "raw\r\n");
-    await f.commit("base");
-    await fs.unlink(path.join(f.repo, "clean.txt"));
-    await f.git("checkout", "--", "clean.txt");
-    expect(await fs.readFile(path.join(f.repo, "clean.txt"), "utf8")).toBe(setting === "true" ? "clean\r\n" : "clean\n");
-    if (setting === "input") await f.put("clean.txt", "clean\r\n");
-    await f.put("changed.txt", "actually changed\r\n");
-    await f.put("raw.txt", "raw changed\r\n");
-    await f.put("untracked.txt", "new\r\n");
-    await f.git("config", "filter.tripwire.clean", "echo executed > filter-executed; exit 1");
-    await f.git("config", "filter.tripwire.process", "echo executed > filter-executed; exit 1");
-    await f.git("config", "filter.tripwire.required", "true");
-    const before = await inventory(f.repo);
-    const out = f.output();
-    const manifest = await f.snap({ uncommitted: true }, out);
-    expect(file(manifest, "clean.txt").status).toBe("");
-    expect(file(manifest, "clean.txt").head?.oid).toBe(file(manifest, "clean.txt").base?.oid);
-    expect(file(manifest, "changed.txt").status).toBe("M");
-    expect(file(manifest, "changed.txt").head?.oid).toBe(blobOid(Buffer.from("actually changed\n")));
-    expect(file(manifest, "changed.txt").head?.size).toBe(Buffer.byteLength("actually changed\n"));
-    await assertStored(out, file(manifest, "changed.txt").head, "actually changed\n");
-    await assertStored(out, file(manifest, "untracked.txt").head, "new\n");
-    await assertStored(out, file(manifest, "raw.txt").base, "raw\r\n");
-    await assertStored(out, file(manifest, "raw.txt").head, "raw changed\r\n");
-    expect(file(manifest, "raw.txt").head?.oid).toBe(blobOid(Buffer.from("raw changed\r\n")));
-    expect(manifest.scope?.eol).toMatchObject({ coreAutocrlf: setting, normalizedPaths: ["changed.txt", "clean.txt", "untracked.txt"], unknownIndexPaths: [] });
-    const commitOut = f.output();
-    const committed = await f.snap({ commit: "HEAD" }, commitOut);
-    await assertStored(commitOut, file(committed, "raw.txt").head, "raw\r\n");
-    expect(await inventory(f.repo)).toEqual(before);
-    expect(existsSync(path.join(f.repo, "filter-executed"))).toBe(false);
-  });
+  test.each(["true", "input"])(
+    "autocrlf=%s ignores checkout-only CRLF, captures real changes and respects -text without filters",
+    async (setting) => {
+      const f = await fixture();
+      await f.git("config", "core.autocrlf", setting);
+      await f.put(".gitattributes", "*.txt filter=tripwire\nraw.txt -text\n");
+      await f.put("clean.txt", "clean\n");
+      await f.put("changed.txt", "before\n");
+      await f.put("raw.txt", "raw\r\n");
+      await f.commit("base");
+      await fs.unlink(path.join(f.repo, "clean.txt"));
+      await f.git("checkout", "--", "clean.txt");
+      expect(await fs.readFile(path.join(f.repo, "clean.txt"), "utf8")).toBe(
+        setting === "true" ? "clean\r\n" : "clean\n",
+      );
+      if (setting === "input") {
+        await f.put("clean.txt", "clean\r\n");
+      }
+      await f.put("changed.txt", "actually changed\r\n");
+      await f.put("raw.txt", "raw changed\r\n");
+      await f.put("untracked.txt", "new\r\n");
+      await f.git("config", "filter.tripwire.clean", "echo executed > filter-executed; exit 1");
+      await f.git("config", "filter.tripwire.process", "echo executed > filter-executed; exit 1");
+      await f.git("config", "filter.tripwire.required", "true");
+      const before = await inventory(f.repo);
+      const out = f.output();
+      const manifest = await f.snap({ uncommitted: true }, out);
+      expect(file(manifest, "clean.txt").status).toBe("");
+      expect(file(manifest, "clean.txt").head?.oid).toBe(file(manifest, "clean.txt").base?.oid);
+      expect(file(manifest, "changed.txt").status).toBe("M");
+      expect(file(manifest, "changed.txt").head?.oid).toBe(
+        blobOid(Buffer.from("actually changed\n")),
+      );
+      expect(file(manifest, "changed.txt").head?.size).toBe(
+        Buffer.byteLength("actually changed\n"),
+      );
+      await assertStored(out, file(manifest, "changed.txt").head, "actually changed\n");
+      await assertStored(out, file(manifest, "untracked.txt").head, "new\n");
+      await assertStored(out, file(manifest, "raw.txt").base, "raw\r\n");
+      await assertStored(out, file(manifest, "raw.txt").head, "raw changed\r\n");
+      expect(file(manifest, "raw.txt").head?.oid).toBe(blobOid(Buffer.from("raw changed\r\n")));
+      expect(manifest.scope?.eol).toMatchObject({
+        coreAutocrlf: setting,
+        normalizedPaths: ["changed.txt", "clean.txt", "untracked.txt"],
+        unknownIndexPaths: [],
+      });
+      const commitOut = f.output();
+      const committed = await f.snap({ commit: "HEAD" }, commitOut);
+      await assertStored(commitOut, file(committed, "raw.txt").head, "raw\r\n");
+      expect(await inventory(f.repo)).toEqual(before);
+      expect(existsSync(path.join(f.repo, "filter-executed"))).toBe(false);
+    },
+  );
 
   test("working text/eol attributes normalize CRLF while preserving all other bytes", async () => {
     const f = await fixture();
     await f.put(".gitattributes", "*.txt -text\n");
     const original = Buffer.from("\ufeffhéllo 🌊\r\nraw\r\n", "utf8");
-    for (const name of ["explicit.txt", "eol-only.txt", "keep.txt"]) await f.put(name, original);
+    for (const name of ["explicit.txt", "eol-only.txt", "keep.txt"]) {
+      await f.put(name, original);
+    }
     await f.commit("raw root");
     // Working attributes take precedence over their still-unchanged index copy.
-    await f.put(".gitattributes", "explicit.txt text eol=crlf\neol-only.txt eol=lf\nkeep.txt -text eol=lf\n");
+    await f.put(
+      ".gitattributes",
+      "explicit.txt text eol=crlf\neol-only.txt eol=lf\nkeep.txt -text eol=lf\n",
+    );
     const before = await inventory(f.repo);
     const out = f.output();
     const manifest = await f.snap({ uncommitted: true }, out);
@@ -352,7 +469,7 @@ describe("dirty snapshots", () => {
     await assertStored(out, file(manifest, "keep.txt").head, original);
     const stagedOut = f.output();
     const staged = await f.snap({ uncommitted: true, staged: true }, stagedOut);
-    expect(staged.files.every(entry => entry.status === "")).toBe(true);
+    expect(staged.files.every((entry) => entry.status === "")).toBe(true);
     await assertStored(stagedOut, file(staged, "explicit.txt").head, original);
     expect(await inventory(f.repo)).toEqual(before);
   });
@@ -395,14 +512,21 @@ describe("dirty snapshots", () => {
 
   test("unusual UTF-8 filenames survive NUL-delimited tree/index parsing", async () => {
     const f = await fixture();
-    const names = ["space name.txt", "日本語.txt", "--looks-like-an-option.txt", ...(process.platform === "win32" ? [] : ["tab\tand\nnewline.txt"])];
-    for (const name of names) await f.put(name, name);
+    const names = [
+      "space name.txt",
+      "日本語.txt",
+      "--looks-like-an-option.txt",
+      ...(process.platform === "win32" ? [] : ["tab\tand\nnewline.txt"]),
+    ];
+    for (const name of names) {
+      await f.put(name, name);
+    }
     await f.commit("names");
     const committed = await f.snap({ commit: "HEAD" });
     const working = await f.snap({ uncommitted: true });
-    expect(committed.files.map(entry => entry.path)).toEqual([...names].sort());
-    expect(working.files.map(entry => entry.path)).toEqual([...names].sort());
-    expect(working.files.every(entry => entry.status === "")).toBe(true);
+    expect(committed.files.map((entry) => entry.path)).toEqual([...names].sort());
+    expect(working.files.map((entry) => entry.path)).toEqual([...names].sort());
+    expect(working.files.every((entry) => entry.status === "")).toBe(true);
   });
 });
 
@@ -416,17 +540,27 @@ describe("blob safety and metadata", () => {
       ["limit.txt", Buffer.alloc(2 * 1024 * 1024, 98)],
       ["empty.txt", Buffer.alloc(0)],
     ]);
-    for (const [name, bytes] of content) await f.put(name, bytes);
+    for (const [name, bytes] of content) {
+      await f.put(name, bytes);
+    }
     await f.commit("various bytes");
     for (const opts of [{ commit: "HEAD" }, { uncommitted: true }]) {
       const out = f.output();
       const manifest = await f.snap(opts, out);
       for (const [name, bytes] of content) {
         const info = file(manifest, name).head!;
-        const kind = name.endsWith(".bin") ? "binary" : name === "large.txt" ? "large" : "text";
+        let kind = "text";
+        if (name.endsWith(".bin")) {
+          kind = "binary";
+        } else if (name === "large.txt") {
+          kind = "large";
+        }
         expect(info).toMatchObject({ oid: blobOid(bytes), size: bytes.length, kind });
-        if (kind !== "text") expect(existsSync(path.join(out, "blobs", `${info.oid}.txt`))).toBe(false);
-        else await assertStored(out, info, bytes);
+        if (kind !== "text") {
+          expect(existsSync(path.join(out, "blobs", `${info.oid}.txt`))).toBe(false);
+        } else {
+          await assertStored(out, info, bytes);
+        }
       }
     }
   });
@@ -453,11 +587,19 @@ describe("blob safety and metadata", () => {
     await fs.mkdir(path.join(f.repo, "vendor"));
     await f.put("vendor/secret.txt", "must not be read");
     const before = await inventory(f.repo);
-    for (const opts of [{ commit: "HEAD" }, { uncommitted: true }, { uncommitted: true, staged: true }]) {
+    for (const opts of [
+      { commit: "HEAD" },
+      { uncommitted: true },
+      { uncommitted: true, staged: true },
+    ]) {
       const out = f.output();
       const manifest = await f.snap(opts, out);
-      expect(file(manifest, "vendor").head).toMatchObject({ oid, mode: "160000", kind: "unavailable" });
-      expect(manifest.files.some(entry => entry.path === "vendor/secret.txt")).toBe(false);
+      expect(file(manifest, "vendor").head).toMatchObject({
+        oid,
+        mode: "160000",
+        kind: "unavailable",
+      });
+      expect(manifest.files.some((entry) => entry.path === "vendor/secret.txt")).toBe(false);
       expect(existsSync(path.join(out, "blobs", `${oid}.txt`))).toBe(false);
     }
     expect(await inventory(f.repo)).toEqual(before);
@@ -466,7 +608,9 @@ describe("blob safety and metadata", () => {
   test("committed symlink stores target bytes, even if target is absent", async () => {
     const f = await fixture();
     const bytes = Buffer.from("../absent-target");
-    const oid = (await run("git", ["hash-object", "-w", "--stdin"], f.repo, bytes)).toString().trim();
+    const oid = (await run("git", ["hash-object", "-w", "--stdin"], f.repo, bytes))
+      .toString()
+      .trim();
     await f.git("update-index", "--add", "--cacheinfo", `120000,${oid},link`);
     await f.git("commit", "-m", "symlink root");
     const out = f.output();
@@ -484,10 +628,17 @@ describe("blob safety and metadata", () => {
     await fs.writeFile(path.join(outside, "secret.txt"), "private outside content");
     await fs.unlink(path.join(f.repo, "nested", "secret.txt"));
     await fs.rmdir(path.join(f.repo, "nested"));
-    await fs.symlink(outside, path.join(f.repo, "nested"), process.platform === "win32" ? "junction" : "dir");
+    await fs.symlink(
+      outside,
+      path.join(f.repo, "nested"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
     const out = f.output();
     const manifest = await f.snap({ uncommitted: true }, out);
-    expect(file(manifest, "nested/secret.txt").head).toMatchObject({ kind: "unavailable", oid: "" });
+    expect(file(manifest, "nested/secret.txt").head).toMatchObject({
+      kind: "unavailable",
+      oid: "",
+    });
     const secretOid = blobOid(Buffer.from("private outside content"));
     expect(existsSync(path.join(out, "blobs", `${secretOid}.txt`))).toBe(false);
   });
@@ -499,10 +650,14 @@ describe("blob safety and metadata", () => {
     const outside = path.join(f.root, "outside");
     await fs.mkdir(outside);
     await fs.writeFile(path.join(outside, "secret.txt"), "not followed");
-    await fs.symlink(outside, path.join(f.repo, "untracked-link"), process.platform === "win32" ? "junction" : "dir");
+    await fs.symlink(
+      outside,
+      path.join(f.repo, "untracked-link"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
     const out = f.output();
     const manifest = await f.snap({ uncommitted: true }, out);
-    expect(manifest.files.some(entry => entry.path.includes("secret.txt"))).toBe(false);
+    expect(manifest.files.some((entry) => entry.path.includes("secret.txt"))).toBe(false);
     const info = file(manifest, "untracked-link").head!;
     expect(info.mode).toBe("120000");
     const target = await fs.readlink(path.join(f.repo, "untracked-link"), { encoding: "buffer" });
@@ -518,7 +673,14 @@ describe("blob safety and metadata", () => {
     await fs.unlink(path.join(f.repo, ".git", "objects", oid.slice(0, 2), oid.slice(2)));
     const manifest = await f.snap({ commit: "HEAD" });
     expect(file(manifest, "missing.txt").head).toMatchObject({ oid, kind: "unavailable" });
-    expect(manifest.scope?.unavailable).toEqual(expect.arrayContaining([expect.objectContaining({ path: "missing.txt", reason: expect.stringContaining("unavailable locally") })]));
+    expect(manifest.scope?.unavailable).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "missing.txt",
+          reason: expect.stringContaining("unavailable locally"),
+        }),
+      ]),
+    );
   });
 });
 
@@ -532,11 +694,17 @@ describe("output protection and CLI", () => {
     await fs.writeFile(path.join(out, "keep.txt"), "keep");
     await expect(f.snap({ commit: "HEAD" }, out)).rejects.toThrow("nonempty");
     expect(await fs.readFile(path.join(out, "keep.txt"), "utf8")).toBe("keep");
-    await expect(f.snap({ commit: "HEAD" }, path.join(f.repo, "capture"))).rejects.toThrow("outside");
-    await expect(f.snap({ commit: "HEAD" }, path.join(f.repo, ".git", "capture"))).rejects.toThrow("outside");
+    await expect(f.snap({ commit: "HEAD" }, path.join(f.repo, "capture"))).rejects.toThrow(
+      "outside",
+    );
+    await expect(f.snap({ commit: "HEAD" }, path.join(f.repo, ".git", "capture"))).rejects.toThrow(
+      "outside",
+    );
     const alias = path.join(f.root, "alias");
     await fs.symlink(f.repo, alias, process.platform === "win32" ? "junction" : "dir");
-    await expect(f.snap({ commit: "HEAD" }, path.join(alias, "capture"))).rejects.toThrow("outside");
+    await expect(f.snap({ commit: "HEAD" }, path.join(alias, "capture"))).rejects.toThrow(
+      "outside",
+    );
     expect(existsSync(path.join(f.repo, "capture"))).toBe(false);
     const empty = f.output();
     await fs.mkdir(empty);
@@ -550,7 +718,11 @@ describe("output protection and CLI", () => {
     await f.commit("root");
     await f.put("nested/a.txt", "dirty");
     const before = await inventory(f.repo);
-    const manifest = await capture({ repo: path.join(f.repo, "nested"), out: f.output(), uncommitted: true });
+    const manifest = await capture({
+      repo: path.join(f.repo, "nested"),
+      out: f.output(),
+      uncommitted: true,
+    });
     expect(file(manifest, "nested/a.txt").head?.oid).toBe(blobOid(Buffer.from("dirty")));
     expect(await inventory(f.repo)).toEqual(before);
   });
@@ -558,28 +730,43 @@ describe("output protection and CLI", () => {
   test("invalid scope combinations fail before writing output", () => {
     const prefix = ["--repo", "repo", "--out", "out"];
     expect(() => parseArgs(prefix)).toThrow("exactly one");
-    expect(() => parseArgs([...prefix, "--commit", "HEAD", "--uncommitted"])).toThrow("exactly one");
+    expect(() => parseArgs([...prefix, "--commit", "HEAD", "--uncommitted"])).toThrow(
+      "exactly one",
+    );
     expect(() => parseArgs([...prefix, "--branch", "main"])).toThrow("requires --base");
-    expect(() => parseArgs([...prefix, "--commit", "HEAD", "--staged"])).toThrow("requires --uncommitted");
-    expect(() => parseArgs([...prefix, "--base", "main", "--commit", "HEAD"])).toThrow("only valid");
+    expect(() => parseArgs([...prefix, "--commit", "HEAD", "--staged"])).toThrow(
+      "requires --uncommitted",
+    );
+    expect(() => parseArgs([...prefix, "--base", "main", "--commit", "HEAD"])).toThrow(
+      "only valid",
+    );
     expect(() => parseArgs([...prefix, "--commit", "HEAD", "--out", "again"])).toThrow("Repeated");
     expect(() => parseArgs([...prefix, "--pr", "bad-ref"])).toThrow("PR number");
     expect(() => parseArgs([...prefix, "--commit", "--staged"])).toThrow("Missing value");
     expect(() => parseArgs([...prefix, "--unknown"])).toThrow("Unknown option");
-    expect(parseArgs([...prefix, "--uncommitted", "--staged"])).toMatchObject({ uncommitted: true, staged: true });
+    expect(parseArgs([...prefix, "--uncommitted", "--staged"])).toMatchObject({
+      uncommitted: true,
+      staged: true,
+    });
   });
 
   test("CLI runs under Bun, prints help, writes output, and exits nonzero on errors", async () => {
     const f = await fixture();
     await f.put("hello", "hello");
     await f.commit("root");
-    const script = path.resolve(import.meta.dir, "../scripts/capture.ts");
+    const script = path.resolve(import.meta.dir, "../skills/code-walkthrough/scripts/capture.ts");
     const help = await run(process.execPath, [script, "--help"], f.repo);
     expect(help.toString()).toContain("--range A...B");
     const out = f.output();
-    const stdout = await run(process.execPath, [script, "--repo", f.repo, "--out", out, "--commit", "HEAD"], f.repo);
+    const stdout = await run(
+      process.execPath,
+      [script, "--repo", f.repo, "--out", out, "--commit", "HEAD"],
+      f.repo,
+    );
     expect(stdout.toString()).toContain("Captured 1 files");
     expect(existsSync(path.join(out, "manifest.json"))).toBe(true);
-    await expect(run(process.execPath, [script, "--repo", f.repo, "--out", out, "--commit", "HEAD"], f.repo)).rejects.toThrow("nonempty");
+    await expect(
+      run(process.execPath, [script, "--repo", f.repo, "--out", out, "--commit", "HEAD"], f.repo),
+    ).rejects.toThrow("nonempty");
   });
 });

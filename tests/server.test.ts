@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "../scripts/serve";
+import { createServer } from "../skills/code-walkthrough/scripts/serve";
 
 test("local server exposes only packaged UI and captured files", async () => {
   const directory = await mkdtemp(join(tmpdir(), "walkthrough-server-"));
@@ -10,8 +10,16 @@ test("local server exposes only packaged UI and captured files", async () => {
   try {
     const oid = "a".repeat(40);
     await mkdir(join(directory, "blobs"));
-    await Bun.write(join(directory, "manifest.json"), JSON.stringify({ schemaVersion: 1, repo: "example", base: "before", head: "after",
-      files: [{ path: "a.ts", status: "A", head: { oid, kind: "text", size: 5 } }] }));
+    await Bun.write(
+      join(directory, "manifest.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        repo: "example",
+        base: "before",
+        head: "after",
+        files: [{ path: "a.ts", status: "A", head: { oid, kind: "text", size: 5 } }],
+      }),
+    );
     await Bun.write(join(directory, "lesson.json"), '{"schemaVersion":1,"steps":[]}');
     await Bun.write(join(directory, "blobs", oid + ".txt"), "hello");
     await Bun.write(join(directory, "private.txt"), "not served");

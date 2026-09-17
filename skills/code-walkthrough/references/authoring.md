@@ -1,6 +1,6 @@
 # Lesson authoring contract
 
-Read this before writing `lesson.json`. The authoritative definitions live in [`viewer/src/types.ts`](../viewer/src/types.ts). Capture owns `manifest.json` and its blobs; authoring owns the lesson. Do not rewrite the capture to fit a narrative.
+Read this before writing `lesson.json`. The authoritative definitions live in [`scripts/types.ts`](../scripts/types.ts). Capture owns `manifest.json` and its blobs; authoring owns the lesson. Do not rewrite the capture to fit a narrative.
 
 ## Captured source
 
@@ -18,16 +18,16 @@ The manifest's paths define the allowed file universe for changes, step targets,
 
 The lesson contains `schemaVersion: 1`, `title`, and `steps`. There is no separate `chapters` field. Express chapters through step titles and narrative progression while retaining one cumulative lesson.
 
-| Step field | Contract |
-| --- | --- |
-| `id` | Stable, unique string identifying the step. |
-| `title` | Short, concrete description of the idea taught. |
-| `paragraphs` | Array of paragraphs; each paragraph is an array of strings and source-link objects. |
-| `file` | Manifest-listed file to open for this step. |
-| `focus` | Optional `[start, end]` line range in the selected version. Use one-based lines. |
+| Step field        | Contract                                                                                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`              | Stable, unique string identifying the step.                                                                                              |
+| `title`           | Short, concrete description of the idea taught.                                                                                          |
+| `paragraphs`      | Array of paragraphs; each paragraph is an array of strings and source-link objects.                                                      |
+| `file`            | Manifest-listed file to open for this step.                                                                                              |
+| `focus`           | Optional `[start, end]` line range in the selected version. Use one-based lines.                                                         |
 | `symbol`, `count` | Symbol-based focus and its line count, as an alternative to a fixed range. Resolve against the selected version and validate the result. |
-| `version` | `"base"`, `"step"`, or `"head"`. Prefer writing it explicitly. |
-| `changes` | Optional map from manifest-listed paths to cumulative changes. |
+| `version`         | `"base"`, `"step"`, or `"head"`. Prefer writing it explicitly.                                                                           |
+| `changes`         | Optional map from manifest-listed paths to cumulative changes.                                                                           |
 
 Give each step a useful focus with `focus` or `symbol`/`count`. Select a file that exists in that version. A deletion can be explained with a `base` link even after the current step has removed the file.
 
@@ -122,7 +122,13 @@ With that capture, the following lesson uses the exact contract and reaches head
       "paragraphs": [
         [
           "Calling greet with a name surrounded by spaces currently preserves those spaces. The ",
-          { "label": "return expression", "path": "src/greet.ts", "start": 2, "end": 2, "version": "base" },
+          {
+            "label": "return expression",
+            "path": "src/greet.ts",
+            "start": 2,
+            "end": 2,
+            "version": "base"
+          },
           " inserts the supplied name directly. The change removes surrounding spaces in the greeting."
         ]
       ]
@@ -139,7 +145,13 @@ With that capture, the following lesson uses the exact contract and reaches head
       "paragraphs": [
         [
           "The ",
-          { "label": "updated expression", "path": "src/greet.ts", "start": 2, "end": 2, "version": "step" },
+          {
+            "label": "updated expression",
+            "path": "src/greet.ts",
+            "start": 2,
+            "end": 2,
+            "version": "step"
+          },
           " trims the name before interpolation. Every caller gets the same greeting behavior; spaces within the name remain."
         ]
       ]

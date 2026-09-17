@@ -1,1 +1,2 @@
-examples/**/blobs/*.txt -text
+* text=auto eol=lf
+skills/code-walkthrough/examples/**/blobs/*.txt -text
