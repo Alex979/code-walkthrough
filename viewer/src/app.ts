@@ -3,15 +3,19 @@ import {
   changeAt,
   defaultSelection,
   diffLines,
+  focusScrollTop,
   fileExists,
   fileStatus,
   makeLocation,
   normalize,
   parseLocation,
   resolveFocus,
-  sourceAtStep,
   type DiffLine,
+  type DisplayMode,
 } from "./model";
+import { prepareStepChanges } from "./changes";
+import { renderInline } from "./prose";
+import { ReadingMemory, type ReadingPosition } from "./navigation";
 import type {
   FileInfo,
   Manifest,
@@ -36,7 +40,7 @@ let step = 0;
 let path = "";
 let version: Version = "step";
 let focus: [number, number] | undefined;
-let mode: "file" | "diff" = "file";
+let mode: DisplayMode = "file";
 
 let filter = "";
 let onlyChanged = false;
@@ -47,6 +51,51 @@ let guideLinks: SourceLink[] = [];
 let showFiles = window.innerWidth > 560;
 let showGuide = true;
 let initialRender = true;
+let renderedSource = "";
+const readingMemory = new ReadingMemory();
+
+interface RenderPosition {
+  scrollTop?: number;
+  scrollLeft?: number;
+  reveal?: boolean;
+}
+
+function sourceIdentity(): string {
+  return JSON.stringify([step, version, mode, mode === "changes" ? "" : path, expandDiff]);
+}
+
+function rememberPosition(): void {
+  if (renderedSource !== sourceIdentity() || (!path && mode !== "changes")) {
+    return;
+  }
+  const body = root.querySelector<HTMLElement>("#code-body")!;
+  readingMemory.save(steps[step].id, {
+    path,
+    version,
+    mode,
+    focus,
+    expandDiff,
+    scrollTop: body.scrollTop,
+    scrollLeft: body.scrollLeft,
+  });
+}
+
+function applyPosition(position: ReadingPosition): void {
+  path = position.path;
+  version = position.version;
+  mode = position.mode;
+  focus = position.focus;
+  expandDiff = position.expandDiff;
+}
+
+interface ChangeRegion {
+  id: string;
+  path: string;
+  label: string;
+}
+
+let changeRegions: ChangeRegion[] = [];
+const stepChangesCache = new Map<number, Promise<{ html: string; regions: ChangeRegion[] }>>();
 
 function escape(value: string): string {
   return value
@@ -120,8 +169,14 @@ async function read(filePath: string, view: Version, at = step): Promise<string 
     return readBlob(file, view);
   }
 
-  const [base, head] = await Promise.all([readBlob(file, "base"), readBlob(file, "head")]);
-  return sourceAtStep(filePath, at, base, head);
+  const change = changeAt(filePath, at);
+  if (change === null) {
+    return undefined;
+  }
+  if (change && "text" in change) {
+    return normalize(change.text);
+  }
+  return readBlob(file, change ? "head" : "base");
 }
 
 function revealPath(filePath: string): void {
@@ -145,16 +200,19 @@ function existsInView(filePath: string): boolean {
 }
 
 function reconcileSelection(): void {
-  if (path && !existsInView(path)) {
-    path = existsInView(steps[step].file) ? steps[step].file : (tabs.findLast(existsInView) ?? "");
-    focus = undefined;
-  }
-  if (path) {
+  // Keep a requested deleted/absent file selected so its diff or placeholder is
+  // honest about this version instead of silently substituting a different file.
+  if (path && mode !== "changes") {
     revealPath(path);
   }
 }
 
 function changeVersion(next: Version): void {
+  rememberPosition();
+  if (mode === "changes") {
+    path = steps[step].file ?? Object.keys(steps[step].changes ?? {})[0] ?? "";
+    mode = "file";
+  }
   version = next;
   focus = undefined;
   expandDiff = false;
@@ -216,7 +274,7 @@ function renderShell(): void {
         <div class="tabs" id="tabs"></div>
         <div class="file-bar">
           <span id="file-path"></span>
-          <button type="button" class="text-button" data-action="return">Return to step’s code</button>
+          <button type="button" class="text-button" data-action="step-file" hidden>Open focused file</button>
         </div>
         <div class="code-toolbar">
           <div class="view-buttons">
@@ -226,6 +284,7 @@ function renderShell(): void {
           <a id="github-source" target="_blank" rel="noreferrer">GitHub ↗</a>
         </div>
         <div class="version-note" id="version-note"></div>
+        <nav class="change-nav" id="change-nav" aria-label="Changes introduced in this step" hidden></nav>
         <div class="code-body" id="code-body">
           <p class="loading">Loading source…</p>
         </div>
@@ -233,7 +292,9 @@ function renderShell(): void {
       </main>
       <aside class="guide-pane" aria-label="Step-by-step walkthrough">
         <div class="guide-top">
-          <span>Walkthrough</span>
+          <div class="guide-heading"><span>Walkthrough</span>
+            <button type="button" class="return-step" data-action="return" title="Restore this step’s starting view">↩ Return to step</button>
+          </div>
           <label>
             <span class="sr-only">Choose a step</span>
             <select id="step-select">${stepOptions}</select>
@@ -396,7 +457,7 @@ function renderTree(): void {
 }
 
 function renderTab(filePath: string): string {
-  const active = filePath === path;
+  const active = mode !== "changes" && filePath === path;
   const escapedPath = escape(filePath);
   const fileName = escape(filePath.split("/").at(-1)!);
 
@@ -405,7 +466,7 @@ function renderTab(filePath: string): string {
       <button
         type="button"
         class="tab-label"
-        data-file="${escapedPath}"
+        data-tab="${escapedPath}"
         title="${escapedPath}"
         ${active ? 'aria-current="page"' : ""}
       >${fileName}</button>
@@ -421,10 +482,24 @@ function renderTab(filePath: string): string {
 }
 
 function renderTabs(): void {
-  root.querySelector("#tabs")!.innerHTML = tabs.filter(existsInView).map(renderTab).join("");
+  const overview = Object.keys(steps[step].changes ?? {}).length
+    ? `<div class="tab ${mode === "changes" ? "active" : ""}"><button type="button" class="tab-label" data-action="overview" ${mode === "changes" ? 'aria-current="page"' : ""}>This step’s changes</button></div>`
+    : "";
+  root.querySelector("#tabs")!.innerHTML =
+    overview +
+    tabs
+      .filter(
+        (filePath) =>
+          existsInView(filePath) ||
+          filePath === path ||
+          readingMemory.file(steps[step].id, filePath),
+      )
+      .map(renderTab)
+      .join("");
 }
 
 async function closeTab(filePath: string): Promise<void> {
+  rememberPosition();
   const visible = tabs.filter(existsInView);
   const visibleIndex = visible.indexOf(filePath);
   const index = tabs.indexOf(filePath);
@@ -433,17 +508,20 @@ async function closeTab(filePath: string): Promise<void> {
   }
 
   tabs.splice(index, 1);
-  if (filePath !== path) {
+  readingMemory.forgetFile(filePath);
+  if (filePath !== path || mode === "changes") {
     renderTabs();
     return;
   }
+  renderedSource = "";
 
   const remaining = visible.filter((tab) => tab !== filePath);
   const adjacent = remaining[Math.min(visibleIndex, remaining.length - 1)];
   if (adjacent) {
-    await openFile(adjacent);
+    await openTab(adjacent, false);
   } else {
     path = "";
+    mode = "file";
     focus = undefined;
 
     renderTabs();
@@ -460,18 +538,28 @@ async function closeTab(filePath: string): Promise<void> {
 
 function renderPart(part: Part): string {
   if (typeof part === "string") {
-    return escape(part);
+    return renderInline(part);
   }
 
   const index = guideLinks.push(part) - 1;
-  const hash = makeLocation(step, part.path, part.version ?? "step");
+  const range: [number, number] | undefined = part.start
+    ? [part.start, part.end ?? part.start]
+    : undefined;
+  const hash = makeLocation(
+    step,
+    part.path,
+    part.version ?? "step",
+    range,
+    part.view === "changes" ? "changes" : "file",
+    part,
+  );
   const title = escape(part.path) + (part.version === "head" ? " · final change" : "");
   // Attribute line breaks leave the authored spacing between paragraph parts intact.
   return `<a
     href="${escape(hash)}"
     data-source="${index}"
     title="${title}"
-  >${escape(part.label)}</a>`;
+  >${renderInline(part.label)}</a>`;
 }
 
 function renderGuide(): void {
@@ -494,10 +582,15 @@ function renderGuide(): void {
   root.querySelector("#announcement")!.textContent = `Step ${step + 1}: ${steps[step].title}`;
 }
 
-function renderCodeRow(row: DiffLine, isDiff: boolean): string {
+function renderCodeRow(
+  row: DiffLine,
+  isDiff: boolean,
+  filePath = path,
+  selection: [number, number] | undefined | null = focus,
+): string {
   const selectedLine =
-    row.next !== undefined && focus && row.next >= focus[0] && row.next <= focus[1];
-  const lineAttribute = row.next ? `data-line="${row.next}"` : "";
+    row.next !== undefined && selection && row.next >= selection[0] && row.next <= selection[1];
+  const lineAttribute = `${row.next ? `data-line="${row.next}"` : ""} ${row.old ? `data-old-line="${row.old}"` : ""}`;
   const oldNumber = isDiff
     ? `<span class="line-number old" aria-hidden="true">${row.old ?? ""}</span>`
     : "";
@@ -519,7 +612,7 @@ function renderCodeRow(row: DiffLine, isDiff: boolean): string {
     oldNumber,
     `<span class="line-number" aria-hidden="true">${row.next ?? ""}</span>`,
     `<span class="change-sign" aria-hidden="true">${changeSign}</span>`,
-    `<code>${highlight(row.text, path) || " "}</code>`,
+    `<code>${highlight(row.text, filePath) || " "}</code>`,
     "</div>",
   ].join("");
 }
@@ -632,8 +725,9 @@ function renderFilePlaceholder(selectedFile: FileInfo | undefined): string {
 
 function fullFileRows(sourceLines: string[], previous: string, current: string): DiffLine[] {
   let addedLines = new Set<number>();
-  // Highlight changes only while reading the lesson's file at its current step.
-  if (version === "step" && path === steps[step].file) {
+  // Every file introduced by this step keeps its additions when opened through
+  // a reference, tree entry, or tab; the default target is not a special case.
+  if (version === "step") {
     try {
       addedLines = new Set(
         diffLines(previous, current)
@@ -671,23 +765,173 @@ function codeStatus(lineCount: number): string {
   return status;
 }
 
-async function renderCode(): Promise<void> {
+function regionLabel(rows: DiffLine[]): string {
+  const changed = rows.filter((row) => row.kind !== "same");
+  const added = changed.flatMap((row) => (row.next === undefined ? [] : [row.next]));
+  const removed = changed.flatMap((row) => (row.old === undefined ? [] : [row.old]));
+  const context = rows.flatMap((row) => (row.next === undefined ? [] : [row.next]));
+  const numbers = added.length ? added : removed.length ? removed : context;
+  const range = numbers.length > 1 ? `${numbers[0]}–${numbers.at(-1)}` : `${numbers[0]}`;
+  return `${added.length ? "Lines" : removed.length ? "Removed lines" : "Context lines"} ${range}`;
+}
+
+function loadStepChanges(at: number): Promise<{ html: string; regions: ChangeRegion[] }> {
+  const cached = stepChangesCache.get(at);
+  if (cached) {
+    return cached;
+  }
+
+  const pending = prepareStepChanges(
+    Object.keys(steps[at].changes ?? {}),
+    at,
+    async (filePath, index) => ({
+      exists: fileExists(files.get(filePath)!, index, "step"),
+      text: await read(filePath, "step", index),
+    }),
+    steps[at].paragraphs
+      .flat()
+      .filter((part): part is SourceLink => typeof part !== "string" && part.view === "changes"),
+  )
+    .then((changes) => {
+      if (changes.some((change) => change.failed)) {
+        stepChangesCache.delete(at);
+      }
+      const entries = changes.map((change, fileIndex) => {
+        const filePath = change.path;
+        const readingVersion = change.kind === "deleted" ? "base" : "step";
+        const regions: ChangeRegion[] = [];
+        let content = "";
+
+        if (change.notice) {
+          const retry = change.failed
+            ? '<button type="button" data-action="retry">Retry</button>'
+            : "";
+          content = `<p class="code-message">${escape(change.notice)} ${retry}</p>`;
+        } else {
+          content = change.regions
+            .map((region, regionIndex) => {
+              const id = `change-${fileIndex}-${regionIndex}`;
+              const label = regionLabel(region.rows);
+              regions.push({ id, path: filePath, label });
+              return `<section class="change-region" id="${id}" tabindex="-1" aria-label="${escape(filePath + ": " + label)}">
+            <div class="region-heading">${escape(label)}</div>
+            ${region.rows.map((row) => renderCodeRow(row, true, filePath, null)).join("")}
+          </section>`;
+            })
+            .join("");
+        }
+
+        const sectionId = `change-file-${fileIndex}`;
+        if (!regions.length) {
+          regions.push({ id: sectionId, path: filePath, label: "File change" });
+        }
+        return {
+          regions,
+          html: `<article class="change-file" id="${sectionId}" data-change-path="${escape(filePath)}" tabindex="-1">
+        <header class="change-file-heading"><strong>${escape(filePath)}</strong>
+          <button type="button" data-change-file="${escape(filePath)}" data-view="${readingVersion}">${change.kind === "deleted" ? "Before change" : "Full file"}</button>
+        </header>${content}</article>`,
+        };
+      });
+      return {
+        html: entries.map((entry) => entry.html).join(""),
+        regions: entries.flatMap((entry) => entry.regions),
+      };
+    })
+    .catch((error) => {
+      stepChangesCache.delete(at);
+      throw error;
+    });
+  stepChangesCache.set(at, pending);
+  return pending;
+}
+
+function renderChangeNavigation(): void {
+  const nav = root.querySelector<HTMLElement>("#change-nav")!;
+  nav.hidden = changeRegions.length === 0;
+  const fileCount = new Set(changeRegions.map((region) => region.path)).size;
+  nav.innerHTML = `<span class="change-summary">This step: ${fileCount} ${fileCount === 1 ? "file" : "files"} · ${changeRegions.length} ${changeRegions.length === 1 ? "region" : "regions"}</span>
+    <div class="change-targets">${changeRegions.map((region, index) => `<button type="button" data-region="${index}" title="${escape(region.path + ": " + region.label)}">${escape(region.path.split("/").at(-1)!)} · ${escape(region.label)}</button>`).join("")}</div>`;
+}
+
+function revealFocus(body: HTMLElement): void {
+  if (!focus) {
+    return;
+  }
+  const source = mode === "changes" ? changeArticle(path) : body;
+  const selected = Array.from(source?.querySelectorAll<HTMLElement>("[data-line]") ?? []).filter(
+    (row) => {
+      const line = Number(row.dataset.line);
+      return line >= focus![0] && line <= focus![1];
+    },
+  );
+  const first = selected[0];
+  const last = selected.at(-1);
+  if (!first || !last) {
+    return;
+  }
+  // The sticky filename header occupies part of the viewport in the overview.
+  const inset =
+    mode === "changes"
+      ? source!.querySelector<HTMLElement>(".change-file-heading")!.offsetHeight
+      : 0;
+  const bodyTop = body.getBoundingClientRect().top + body.clientTop;
+  const top = first.getBoundingClientRect().top - bodyTop + body.scrollTop;
+  const bottom = last.getBoundingClientRect().bottom - bodyTop + body.scrollTop;
+  body.scrollTop = Math.max(
+    0,
+    focusScrollTop(body.scrollTop + inset, body.clientHeight - inset, top, bottom) - inset,
+  );
+}
+
+function changeArticle(filePath: string): HTMLElement | undefined {
+  return Array.from(root.querySelectorAll<HTMLElement>("[data-change-path]")).find(
+    (article) => article.dataset.changePath === filePath,
+  );
+}
+
+function markOverviewFocus(): void {
+  root
+    .querySelectorAll("#code-body .line-focus")
+    .forEach((line) => line.classList.remove("line-focus"));
+  if (!focus || !path) {
+    return;
+  }
+  changeArticle(path)
+    ?.querySelectorAll<HTMLElement>("[data-line]")
+    .forEach((line) => {
+      const number = Number(line.dataset.line);
+      line.classList.toggle("line-focus", number >= focus![0] && number <= focus![1]);
+    });
+}
+
+async function renderCode(position: RenderPosition = {}): Promise<void> {
   const ticket = ++requestId;
-  root.querySelector(".code-pane")!.classList.toggle("no-file", !path);
-  if (!path) {
-    root.querySelector("#code-body")!.innerHTML =
-      `<p class="code-message">Select a file in the browser, or <button
-      type="button"
-      class="text-button"
-      data-action="return"
-    >return to this step’s code</button>.</p>`;
-    root.querySelector("#code-status")!.textContent = "";
+  const body = root.querySelector<HTMLElement>("#code-body")!;
+  const sourceKey = sourceIdentity();
+  const savedScroll = position.scrollTop ?? (renderedSource === sourceKey ? body.scrollTop : 0);
+  const savedHorizontal =
+    position.scrollLeft ?? (renderedSource === sourceKey ? body.scrollLeft : 0);
+  const overview = mode === "changes";
+  root.querySelector<HTMLButtonElement>('[data-action="step-file"]')!.hidden =
+    !overview || !steps[step].file;
+  root.querySelector(".code-pane")!.classList.toggle("no-file", !path && !overview);
+  root.querySelector(".code-pane")!.classList.toggle("show-changes", overview);
+  root.querySelector<HTMLSelectElement>("#version")!.value = version;
+  root.querySelector("#code-status")!.textContent = "";
+  if (!path && !overview) {
+    body.innerHTML =
+      '<p class="code-message">Open a source reference or choose a file to explore.</p>';
+    changeRegions = [];
+    renderChangeNavigation();
+    renderedSource = sourceKey;
     return;
   }
 
   const selectedFile = files.get(path);
-  root.querySelector("#file-path")!.textContent = path;
-  root.querySelector<HTMLSelectElement>("#version")!.value = version;
+  root.querySelector("#file-path")!.textContent = overview
+    ? "Changes introduced in this step"
+    : path;
   root
     .querySelectorAll<HTMLButtonElement>("[data-mode]")
     .forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.mode === mode)));
@@ -702,24 +946,54 @@ async function renderCode(): Promise<void> {
   }
   github.textContent = "Change source ↗";
 
-  root.querySelector("#code-status")!.textContent = "";
-  const body = root.querySelector<HTMLElement>("#code-body")!;
-  body.innerHTML = '<p class="loading">Loading source…</p>';
+  if (renderedSource !== sourceKey) {
+    body.innerHTML = '<p class="loading">Loading source…</p>';
+  }
 
   try {
+    const pendingChanges = loadStepChanges(step);
+    if (overview) {
+      const changes = await pendingChanges;
+      if (ticket !== requestId) {
+        return;
+      }
+      changeRegions = changes.regions;
+      renderChangeNavigation();
+      body.innerHTML = changes.html;
+      markOverviewFocus();
+      body.scrollTop = savedScroll;
+      body.scrollLeft = savedHorizontal;
+      renderedSource = sourceKey;
+      root.querySelector("#code-status")!.textContent =
+        "All changes in this step · Compared with the preceding state" +
+        (focus && path ? ` · Selected ${path}:${focus[0]}–${focus[1]}` : "");
+      if (position.reveal !== false) {
+        revealFocus(body);
+      }
+      return;
+    }
+
+    // Optional browsing must not wait for unrelated files in the step overview.
+    void pendingChanges
+      .then((changes) => {
+        if (ticket === requestId) {
+          changeRegions = changes.regions;
+          renderChangeNavigation();
+        }
+      })
+      .catch(() => {
+        // The overview itself presents its retryable errors when opened.
+      });
+
     const currentText = await read(path, version);
     if (ticket !== requestId) {
       return;
     }
-    if (currentText === undefined) {
+    const deletedDiff = mode === "diff" && selectedFile && !fileExists(selectedFile, step, version);
+    if (currentText === undefined && !deletedDiff) {
       body.innerHTML = renderFilePlaceholder(selectedFile);
+      renderedSource = sourceKey;
       return;
-    }
-
-    // A saved step URL may name the file without a line selection. Restore the
-    // lesson's selection before rendering, including on the initial page load.
-    if (!focus && version === "step" && path === steps[step].file) {
-      focus = resolveFocus(currentText, steps[step]);
     }
 
     let previous: string | undefined;
@@ -732,28 +1006,25 @@ async function renderCode(): Promise<void> {
       return;
     }
 
-    const sourceLines = currentText.split("\n");
+    const sourceLines = (currentText ?? "").split("\n");
     let rows: DiffLine[];
     if (mode === "diff") {
-      rows = diffLines(previous ?? "", currentText);
+      rows = diffLines(previous ?? "", currentText ?? "");
     } else {
-      rows = fullFileRows(sourceLines, previous ?? "", currentText);
+      rows = fullFileRows(sourceLines, previous ?? "", currentText ?? "");
     }
 
     body.innerHTML = renderRows(rows, mode === "diff");
     root.querySelector("#code-status")!.textContent = codeStatus(sourceLines.length);
-    body.scrollTop = 0;
+    body.scrollTop = savedScroll;
+    body.scrollLeft = savedHorizontal;
+    renderedSource = sourceKey;
     requestAnimationFrame(() => {
-      if (ticket !== requestId || !focus) {
+      if (ticket !== requestId) {
         return;
       }
-      const target =
-        body.querySelector<HTMLElement>(`[data-line="${focus[0]}"]`) ??
-        body.querySelector<HTMLElement>(".line-focus");
-      if (target) {
-        const lineTop =
-          target.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
-        body.scrollTop = Math.max(0, lineTop - 48);
+      if (position.reveal !== false) {
+        revealFocus(body);
       }
     });
   } catch (error) {
@@ -771,6 +1042,7 @@ async function renderCode(): Promise<void> {
 }
 
 async function openFile(filePath: string, target?: SourceLink, record = true): Promise<void> {
+  rememberPosition();
   path = filePath;
   if (target) {
     version = target.version ?? "step";
@@ -802,6 +1074,9 @@ async function openFile(filePath: string, target?: SourceLink, record = true): P
     } catch {
       // renderCode presents a retryable read error.
     }
+    if (pending !== requestId) {
+      return;
+    }
   }
 
   if (record) {
@@ -810,25 +1085,140 @@ async function openFile(filePath: string, target?: SourceLink, record = true): P
   await renderCode();
 }
 
+async function openTab(filePath: string, remember = true): Promise<void> {
+  if (remember) {
+    rememberPosition();
+  }
+  const position = readingMemory.file(steps[step].id, filePath);
+  if (!position) {
+    await openFile(filePath);
+    return;
+  }
+  applyPosition(position);
+  reconcileSelection();
+  renderTree();
+  renderTabs();
+  updateLocation();
+  await renderCode({ ...position, reveal: false });
+}
+
+async function openOverview(): Promise<void> {
+  rememberPosition();
+  const position = readingMemory.overview(steps[step].id);
+  if (position) {
+    applyPosition(position);
+  } else {
+    path = "";
+    version = "step";
+    mode = "changes";
+    focus = undefined;
+    expandDiff = false;
+  }
+  renderTree();
+  renderTabs();
+  updateLocation();
+  await renderCode({ ...position, reveal: false });
+}
+
+async function openPointer(target: SourceLink): Promise<void> {
+  if (target.view !== "changes") {
+    await openFile(target.path, target);
+    return;
+  }
+
+  rememberPosition();
+  path = target.path;
+  version = "step";
+  mode = "changes";
+  focus = undefined;
+  expandDiff = false;
+  const pending = ++requestId;
+  try {
+    const text = await read(path, "step");
+    if (pending !== requestId) {
+      return;
+    }
+    if (text !== undefined) {
+      focus = resolveFocus(text, target);
+    }
+  } catch {
+    // Overview preparation keeps a failed source explicit and retryable.
+  }
+  if (pending !== requestId) {
+    return;
+  }
+  renderTree();
+  renderTabs();
+  updateLocation();
+  await renderCode();
+}
+
+async function openFullFile(button: HTMLElement): Promise<void> {
+  const filePath = button.dataset.changeFile!;
+  const selectedVersion = button.dataset.view as Version;
+  const article = changeArticle(filePath);
+  const body = root.querySelector<HTMLElement>("#code-body")!;
+  const header = article?.querySelector<HTMLElement>(".change-file-heading");
+  const visibleTop = Math.max(
+    body.getBoundingClientRect().top,
+    header?.getBoundingClientRect().bottom ?? 0,
+  );
+  const visibleBottom = body.getBoundingClientRect().bottom;
+  const visibleRows = Array.from(
+    article?.querySelectorAll<HTMLElement>(".code-line[data-line]") ?? [],
+  ).filter(
+    (row) =>
+      row.getBoundingClientRect().bottom > visibleTop &&
+      row.getBoundingClientRect().top < visibleBottom,
+  );
+  const first = visibleRows.find((row) => row.classList.contains("add")) ?? visibleRows[0];
+  // Current diff coordinates belong to the cumulative source, never to base.
+  const line = selectedVersion === "step" && first ? Number(first.dataset.line) : undefined;
+  await openFile(filePath, {
+    label: "",
+    path: filePath,
+    version: selectedVersion,
+    start: line,
+  });
+}
+
 async function goStep(index: number, record = true): Promise<void> {
+  rememberPosition();
   step = Math.max(0, Math.min(steps.length - 1, index));
+  // Returning to the authored start is distinct from returning to a reader tab.
+  renderedSource = "";
   const choice = defaultSelection(steps[step]);
   version = choice.version;
+  changeRegions = [];
+  renderChangeNavigation();
 
   renderGuide();
-  await openFile(
-    choice.path,
-    {
-      label: "",
-      path: choice.path,
-      version: choice.version,
-      symbol: steps[step].symbol,
-      count: steps[step].count,
-      start: steps[step].focus?.[0],
-      end: steps[step].focus?.[1],
-    },
-    record,
-  );
+  if (choice.mode === "changes" || !choice.path) {
+    path = "";
+    mode = choice.mode;
+    focus = undefined;
+    expandDiff = false;
+    renderTree();
+    renderTabs();
+    if (record) {
+      updateLocation();
+    }
+    await renderCode();
+  } else {
+    await openFile(
+      choice.path,
+      {
+        label: "",
+        path: choice.path,
+        version: choice.version,
+        symbol: steps[step].symbol,
+        count: steps[step].count,
+        start: steps[step].focus?.[0],
+        end: steps[step].focus?.[1],
+      },
+      record,
+    );
+  }
 
   if (!initialRender) {
     const heading = root.querySelector<HTMLElement>("#guide-title")!;
@@ -836,6 +1226,48 @@ async function goStep(index: number, record = true): Promise<void> {
     heading.focus({ preventScroll: true });
   }
   initialRender = false;
+}
+
+async function openRegion(index: number): Promise<void> {
+  const region = changeRegions[index];
+  if (!region) {
+    return;
+  }
+  const at = step;
+  if (mode !== "changes") {
+    const pending = openOverview();
+    const ticket = requestId;
+    await pending;
+    if (ticket !== requestId) {
+      return;
+    }
+  }
+  if (step !== at || mode !== "changes") {
+    return;
+  }
+  const body = root.querySelector<HTMLElement>("#code-body")!;
+  focus = undefined;
+  path = "";
+  markOverviewFocus();
+  updateLocation();
+  const target = document.getElementById(region.id);
+  if (target) {
+    const inset =
+      target.closest(".change-file")?.querySelector<HTMLElement>(".change-file-heading")
+        ?.offsetHeight ?? 0;
+    const top =
+      target.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
+    body.scrollTop = Math.max(
+      0,
+      focusScrollTop(
+        body.scrollTop + inset,
+        body.clientHeight - inset,
+        top,
+        top + target.offsetHeight,
+      ) - inset,
+    );
+    target.focus({ preventScroll: true });
+  }
 }
 
 function handleClick(event: MouseEvent): void {
@@ -848,6 +1280,14 @@ function handleClick(event: MouseEvent): void {
     void closeTab(element.dataset.closeFile);
     return;
   }
+  if (element.dataset.region !== undefined) {
+    void openRegion(Number(element.dataset.region));
+    return;
+  }
+  if (element.dataset.changeFile) {
+    void openFullFile(element);
+    return;
+  }
   if (element.dataset.source !== undefined) {
     if (event.ctrlKey || event.metaKey) {
       return;
@@ -855,7 +1295,11 @@ function handleClick(event: MouseEvent): void {
 
     event.preventDefault();
     const link = guideLinks[Number(element.dataset.source)];
-    void openFile(link.path, link);
+    void openPointer(link);
+    return;
+  }
+  if (element.dataset.tab) {
+    void openTab(element.dataset.tab);
     return;
   }
   if (element.dataset.file) {
@@ -874,9 +1318,11 @@ function handleClick(event: MouseEvent): void {
     return;
   }
   if (element.dataset.mode) {
+    rememberPosition();
     mode = element.dataset.mode as typeof mode;
     expandDiff = false;
     updateLocation();
+    renderTabs();
     void renderCode();
     return;
   }
@@ -889,16 +1335,26 @@ function handleClick(event: MouseEvent): void {
       void goStep(step - 1);
       break;
     case "return":
-      void openFile(steps[step].file, {
-        label: "",
-        path: steps[step].file,
-        symbol: steps[step].symbol,
-        count: steps[step].count,
-        start: steps[step].focus?.[0],
-        end: steps[step].focus?.[1],
-        version: steps[step].version ?? "step",
-      });
+      void goStep(step);
       break;
+    case "overview":
+      void openOverview();
+      break;
+    case "step-file": {
+      const target = steps[step];
+      if (target.file) {
+        void openFile(target.file, {
+          label: "",
+          path: target.file,
+          version: target.version ?? "step",
+          start: target.focus?.[0],
+          end: target.focus?.[1],
+          symbol: target.symbol,
+          count: target.count,
+        });
+      }
+      break;
+    }
     case "final-file":
       changeVersion("head");
       break;
@@ -922,31 +1378,66 @@ function handleClick(event: MouseEvent): void {
   }
 }
 
-function restoreLocation(): void {
+async function resolveLocationAnchor(target: {
+  symbol?: string;
+  count?: number;
+}): Promise<boolean> {
+  const pending = ++requestId;
+  if (focus || !path || !target.symbol) {
+    return true;
+  }
+  try {
+    const text = await read(path, version);
+    if (pending !== requestId) {
+      return false;
+    }
+    if (text !== undefined) {
+      focus = resolveFocus(text, target);
+    }
+  } catch {
+    // The source renderer supplies the retryable loading error.
+  }
+  return pending === requestId;
+}
+
+async function restoreLocation(): Promise<void> {
   if (!manifest) {
     return;
   }
 
   const state = parseLocation(location.hash);
+  rememberPosition();
   step = state.step;
+  if (state.path === undefined && state.mode === undefined) {
+    void goStep(step, false);
+    return;
+  }
+  const choice = defaultSelection(steps[step]);
 
   // An explicit empty path restores no selected file; missing or unknown paths
   // use the lesson's file. Rendering can restore lesson focus when none was saved.
   if (state.path === "" || (state.path && files.has(state.path))) {
     path = state.path;
   } else {
-    path = steps[step].file;
+    path = choice.path;
   }
 
-  version = state.version ?? "step";
+  version = state.version ?? choice.version;
   focus = state.focus;
-  mode = state.mode ?? "file";
+  mode = state.mode ?? (state.path === undefined ? choice.mode : "file");
+  if (mode === "changes") {
+    version = "step";
+  }
 
+  changeRegions = [];
+  renderChangeNavigation();
   reconcileSelection();
   renderTree();
   renderTabs();
   renderGuide();
-  void renderCode();
+  if (await resolveLocationAnchor(state)) {
+    await renderCode();
+  }
 }
 
 async function initialize(): Promise<void> {
@@ -971,13 +1462,17 @@ async function initialize(): Promise<void> {
 
   const initial = parseLocation(location.hash);
   step = initial.step;
-  path = initial.path ?? steps[step].file;
-  version = initial.version ?? "step";
+  const choice = defaultSelection(steps[step]);
+  path = initial.path ?? choice.path;
+  version = initial.version ?? choice.version;
   focus = initial.focus;
-  mode = initial.mode ?? "file";
+  mode = initial.mode ?? (initial.path === undefined ? choice.mode : "file");
   files = new Map(manifest.files.map((file) => [file.path, file]));
   if (path && !files.has(path)) {
-    path = steps[step].file;
+    path = choice.path;
+  }
+  if (mode === "changes") {
+    version = "step";
   }
   reconcileSelection();
 
@@ -987,15 +1482,19 @@ async function initialize(): Promise<void> {
   renderGuide();
   root.classList.toggle("hide-files", !showFiles);
   root.querySelector('[data-action="files"]')!.setAttribute("aria-pressed", String(showFiles));
-  if (initial.path !== undefined) {
-    await renderCode();
+  if (initial.path !== undefined || initial.mode !== undefined) {
+    if (await resolveLocationAnchor(initial)) {
+      await renderCode();
+    }
   } else {
     await goStep(step, false);
   }
 }
 
 root.addEventListener("click", handleClick);
-window.addEventListener("hashchange", restoreLocation);
+window.addEventListener("hashchange", () => {
+  void restoreLocation();
+});
 
 try {
   await initialize();

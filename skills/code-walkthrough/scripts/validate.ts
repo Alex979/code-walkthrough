@@ -16,10 +16,13 @@ import type { BlobInfo, Lesson, Manifest, SourceLink, Version } from "./types";
  * file selection, but cannot supply source lines or symbols.
  *
  * Changes apply before that step's selections/links and accumulate from base.
- * Selections default to version:"step". Lines are 1-based, split on LF (including
+ * A step may omit its reading target; its anchors and version then must be omitted
+ * too. Selections default to version:"step". Lines are 1-based, split on LF (including
  * a final empty line). Symbols are literal substrings matching exactly one line;
  * count is the number of lines starting there (default 1). They are not parsed
- * language symbols. Prose links resolve their own version independently.
+ * language symbols. File links resolve their own version independently. Links
+ * with view:"changes" require an anchor in a path changed by this step and can
+ * only select its cumulative source. Their range may include unchanged context.
  */
 export interface ValidationResult {
   ok: true;
@@ -294,7 +297,17 @@ function validateLessonShape(value: unknown, errors: Problems): void {
     );
     validateRequiredText(step.id, `${at}.id`, errors);
     validateRequiredText(step.title, `${at}.title`, errors);
-    validatePathField(step.file, `${at}.file`, errors);
+    if ("file" in step) {
+      validatePathField(step.file, `${at}.file`, errors);
+    } else {
+      for (const field of ["focus", "symbol", "count", "version"]) {
+        if (field in step) {
+          errors.add(
+            `${at}.${field}: requires file; omit target fields for a step without a reading target.`,
+          );
+        }
+      }
+    }
     if (typeof step.id === "string") {
       if (ids.has(step.id)) {
         errors.add(`${at}.id: duplicate step ID ${JSON.stringify(step.id)}.`);
@@ -325,13 +338,33 @@ function validateLessonShape(value: unknown, errors: Problems): void {
           }
           validateKeys(
             part,
-            ["label", "path", "start", "end", "symbol", "count", "version"],
+            ["label", "path", "view", "start", "end", "symbol", "count", "version"],
             linkAt,
             errors,
           );
           validateRequiredText(part.label, `${linkAt}.label`, errors);
           validatePathField(part.path, `${linkAt}.path`, errors);
           validateAnchor(part, linkAt, false, errors);
+          if ("view" in part && !["file", "changes"].includes(part.view as string)) {
+            errors.add(`${linkAt}.view: expected "file" or "changes".`);
+          }
+          if (part.view === "changes") {
+            if ("version" in part && part.version !== "step") {
+              errors.add(
+                `${linkAt}.version: view:"changes" requires "step" or an omitted version.`,
+              );
+            }
+            if (!("start" in part) && !("symbol" in part)) {
+              errors.add(`${linkAt}: view:"changes" requires a start/end or symbol/count anchor.`);
+            }
+            if (
+              !isObject(step.changes) ||
+              typeof part.path !== "string" ||
+              !Object.hasOwn(step.changes, part.path)
+            ) {
+              errors.add(`${linkAt}.path: view:"changes" requires a path in this step's changes.`);
+            }
+          }
         });
       });
     }
@@ -668,7 +701,9 @@ export async function validate(dir: string): Promise<ValidationResult> {
     // A selection in this step must resolve after its changes have been applied.
     applyChanges(step, at);
 
-    validateSelection(step.file, step.version, `${at}.file`, step.focus, step.symbol, step.count);
+    if (step.file !== undefined) {
+      validateSelection(step.file, step.version, `${at}.file`, step.focus, step.symbol, step.count);
+    }
     for (const [paragraphIndex, paragraph] of step.paragraphs.entries()) {
       for (const [partIndex, part] of paragraph.entries()) {
         if (typeof part === "string") {

@@ -49,21 +49,6 @@ function normalize(text) {
 `, `
 `);
 }
-function sourceAtStep(path, index, before, after) {
-  const change = changeAt(path, index);
-  let source;
-  if (change === null) {
-    return;
-  }
-  if (change === undefined) {
-    source = before;
-  } else if ("text" in change) {
-    source = change.text;
-  } else {
-    source = after;
-  }
-  return source === undefined ? undefined : normalize(source);
-}
 function resolveFocus(text, target) {
   const lines = normalize(text).split(`
 `);
@@ -91,30 +76,91 @@ function parseLocation(hash) {
   const requestedVersion = params.get("view");
   const firstLine = Number(params.get("line"));
   const requestedEnd = Number(params.get("end"));
+  const requestedMode = params.get("mode");
   let version;
   if (["base", "step", "head"].includes(requestedVersion ?? "")) {
     version = requestedVersion;
+  }
+  let mode;
+  if (["file", "diff", "changes"].includes(requestedMode ?? "")) {
+    mode = requestedMode;
   }
   let focus;
   if (firstLine > 0) {
     const lastLine = requestedEnd >= firstLine ? requestedEnd : firstLine;
     focus = [firstLine, lastLine];
   }
-  return {
+  const state = {
     step: stepIndex,
     path: params.get("file") ?? undefined,
     version,
     focus,
-    mode: params.get("mode") === "diff" ? "diff" : "file"
+    mode
   };
+  const symbol = params.get("symbol");
+  if (!focus && symbol) {
+    state.symbol = symbol;
+    const count = Number(params.get("count"));
+    if (Number.isSafeInteger(count) && count > 0) {
+      state.count = count;
+    }
+  }
+  return state;
 }
-function makeLocation(step, path, version, focus, mode = "file") {
+function makeLocation(step, path, version, focus, mode = "file", target) {
   const params = new URLSearchParams({ step: steps[step].id, file: path, view: version, mode });
   if (focus) {
     params.set("line", String(focus[0]));
     params.set("end", String(focus[1]));
+  } else if (target?.symbol) {
+    params.set("symbol", target.symbol);
+    if (target.count !== undefined) {
+      params.set("count", String(target.count));
+    }
   }
   return `#${params}`;
+}
+function diffRegions(rows, context = 3, focuses = []) {
+  const padding = Math.max(0, Math.floor(context));
+  const bounds = [];
+  for (let index = 0;index < rows.length; index++) {
+    const row = rows[index];
+    const currentLine = row.next;
+    const includesPointer = currentLine !== undefined && focuses.some(([first, last]) => currentLine >= first && currentLine <= last);
+    if (row.kind === "same" && !includesPointer) {
+      continue;
+    }
+    const start = Math.max(0, index - padding);
+    const end = Math.min(rows.length - 1, index + padding);
+    const previous = bounds[bounds.length - 1];
+    if (previous && start <= previous.end + 1) {
+      previous.end = Math.max(previous.end, end);
+    } else {
+      bounds.push({ start, end });
+    }
+  }
+  return bounds.map(({ start, end }) => ({ start, end, rows: rows.slice(start, end + 1) }));
+}
+function focusScrollTop(scrollTop, viewportHeight, targetTop, targetBottom) {
+  if (viewportHeight <= 0) {
+    return scrollTop;
+  }
+  if (targetTop >= scrollTop && targetBottom <= scrollTop + viewportHeight) {
+    return scrollTop;
+  }
+  const targetHeight = targetBottom - targetTop;
+  if (targetHeight > viewportHeight) {
+    const spaceAbove = targetTop - scrollTop;
+    if (spaceAbove >= 0 && spaceAbove <= 48) {
+      return scrollTop;
+    }
+    return Math.max(0, targetTop - 48);
+  }
+  const context = Math.min(48, (viewportHeight - targetHeight) / 2);
+  if (targetTop < scrollTop) {
+    return Math.max(0, targetTop - context);
+  }
+  return Math.max(0, targetBottom - viewportHeight + context);
 }
 function diffLines(before, after) {
   const beforeLines = normalize(before).replace(/\n$/, "").split(`
@@ -127,15 +173,27 @@ function diffLines(before, after) {
   if (!after) {
     afterLines.length = 0;
   }
-  if (beforeLines.length * afterLines.length > 3000000) {
+  let prefixLength = 0;
+  while (prefixLength < beforeLines.length && prefixLength < afterLines.length && beforeLines[prefixLength] === afterLines[prefixLength]) {
+    prefixLength++;
+  }
+  let beforeEnd = beforeLines.length;
+  let afterEnd = afterLines.length;
+  while (beforeEnd > prefixLength && afterEnd > prefixLength && beforeLines[beforeEnd - 1] === afterLines[afterEnd - 1]) {
+    beforeEnd--;
+    afterEnd--;
+  }
+  const beforeLength = beforeEnd - prefixLength;
+  const afterLength = afterEnd - prefixLength;
+  if (beforeLength * afterLength > 3000000) {
     throw new RangeError("This diff is too large for an inline comparison. Use Full file to read either version.");
   }
-  const width = afterLines.length + 1;
-  const table = new Uint32Array((beforeLines.length + 1) * width);
-  for (let beforeIndex2 = beforeLines.length - 1;beforeIndex2 >= 0; beforeIndex2--) {
-    for (let afterIndex2 = afterLines.length - 1;afterIndex2 >= 0; afterIndex2--) {
+  const width = afterLength + 1;
+  const table = new Uint32Array((beforeLength + 1) * width);
+  for (let beforeIndex2 = beforeLength - 1;beforeIndex2 >= 0; beforeIndex2--) {
+    for (let afterIndex2 = afterLength - 1;afterIndex2 >= 0; afterIndex2--) {
       const cell = beforeIndex2 * width + afterIndex2;
-      if (beforeLines[beforeIndex2] === afterLines[afterIndex2]) {
+      if (beforeLines[prefixLength + beforeIndex2] === afterLines[prefixLength + afterIndex2]) {
         table[cell] = table[(beforeIndex2 + 1) * width + afterIndex2 + 1] + 1;
       } else {
         const skipBefore = table[(beforeIndex2 + 1) * width + afterIndex2];
@@ -145,11 +203,16 @@ function diffLines(before, after) {
     }
   }
   const result = [];
-  let beforeIndex = 0;
-  let afterIndex = 0;
-  while (beforeIndex < beforeLines.length || afterIndex < afterLines.length) {
-    const hasBefore = beforeIndex < beforeLines.length;
-    const hasAfter = afterIndex < afterLines.length;
+  for (let index = 0;index < prefixLength; index++) {
+    result.push({ kind: "same", text: beforeLines[index], old: index + 1, next: index + 1 });
+  }
+  let beforeIndex = prefixLength;
+  let afterIndex = prefixLength;
+  while (beforeIndex < beforeEnd || afterIndex < afterEnd) {
+    const hasBefore = beforeIndex < beforeEnd;
+    const hasAfter = afterIndex < afterEnd;
+    const tableBefore = beforeIndex - prefixLength;
+    const tableAfter = afterIndex - prefixLength;
     if (hasBefore && hasAfter && beforeLines[beforeIndex] === afterLines[afterIndex]) {
       result.push({
         kind: "same",
@@ -159,7 +222,7 @@ function diffLines(before, after) {
       });
       beforeIndex++;
       afterIndex++;
-    } else if (hasAfter && (!hasBefore || table[beforeIndex * width + afterIndex + 1] > table[(beforeIndex + 1) * width + afterIndex])) {
+    } else if (hasAfter && (!hasBefore || table[tableBefore * width + tableAfter + 1] > table[(tableBefore + 1) * width + tableAfter])) {
       result.push({ kind: "add", text: afterLines[afterIndex], next: afterIndex + 1 });
       afterIndex++;
     } else {
@@ -167,10 +230,231 @@ function diffLines(before, after) {
       beforeIndex++;
     }
   }
+  while (beforeIndex < beforeLines.length) {
+    result.push({
+      kind: "same",
+      text: beforeLines[beforeIndex],
+      old: beforeIndex + 1,
+      next: afterIndex + 1
+    });
+    beforeIndex++;
+    afterIndex++;
+  }
   return result;
 }
 function defaultSelection(step) {
-  return { path: step.file, version: step.version ?? "step" };
+  if (Object.keys(step.changes ?? {}).length > 0) {
+    return { path: "", version: "step", mode: "changes" };
+  }
+  return { path: step.file ?? "", version: step.version ?? "step", mode: "file" };
+}
+
+// viewer/src/changes.ts
+function changeKind(previous, current) {
+  if (!previous.exists && current.exists) {
+    return "added";
+  }
+  if (previous.exists && !current.exists) {
+    return "deleted";
+  }
+  return "modified";
+}
+async function prepareFileChange(path, at, readState, pointers) {
+  let previous;
+  let current;
+  try {
+    [previous, current] = await Promise.all([readState(path, at - 1), readState(path, at)]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      path,
+      kind: "modified",
+      regions: [],
+      notice: `Could not load this file's changes: ${message}`,
+      failed: true
+    };
+  }
+  const kind = changeKind(previous, current);
+  const change = { path, kind, regions: [], failed: false };
+  if (previous.exists && previous.text === undefined || current.exists && current.text === undefined) {
+    let action = "Updated asset";
+    if (kind === "added") {
+      action = "Added asset";
+    } else if (kind === "deleted") {
+      action = "Deleted asset";
+    }
+    change.notice = `${action}. This capture does not provide a text comparison.`;
+    return change;
+  }
+  const previousText = previous.exists ? previous.text : "";
+  const currentText = current.exists ? current.text : "";
+  try {
+    const focuses = [];
+    if (current.exists) {
+      for (const pointer of pointers) {
+        if (pointer.path !== path || pointer.view !== "changes" || pointer.version !== undefined && pointer.version !== "step") {
+          continue;
+        }
+        const focus = resolveFocus(currentText, pointer);
+        if (focus) {
+          focuses.push(focus);
+        }
+      }
+    }
+    const rows = diffLines(previousText, currentText);
+    const currentLines = normalize(currentText).split(`
+`);
+    const finalLine = currentLines.length;
+    if (currentLines.at(-1) === "" && focuses.some(([first, last]) => first <= finalLine && last >= finalLine)) {
+      const previousLines = normalize(previousText).split(`
+`);
+      const old = previous.exists && previousLines.at(-1) === "" ? previousLines.length : undefined;
+      rows.push({ kind: "same", text: "", next: finalLine, old });
+    }
+    change.regions = diffRegions(rows, 3, focuses);
+    if (!change.regions.length) {
+      change.notice = "No visible line differences. File bytes or metadata may have changed.";
+    }
+  } catch (error) {
+    if (!(error instanceof RangeError)) {
+      throw error;
+    }
+    change.notice = error.message;
+  }
+  return change;
+}
+function prepareStepChanges(paths, at, readState, pointers = []) {
+  return Promise.all(paths.map((path) => prepareFileChange(path, at, readState, pointers)));
+}
+
+// viewer/src/prose.ts
+function escapeText(text) {
+  return text.replace(/[&<>"']/g, (character) => {
+    const entities = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    };
+    return entities[character];
+  });
+}
+function markerRun(text, start, marker) {
+  let end = start;
+  while (text[end] === marker) {
+    end++;
+  }
+  return end - start;
+}
+function closingBacktick(text, start) {
+  let position = text.indexOf("`", start);
+  while (position !== -1) {
+    const length = markerRun(text, position, "`");
+    if (length === 1) {
+      return position;
+    }
+    position = text.indexOf("`", position + length);
+  }
+  return -1;
+}
+function renderInline(text) {
+  const frames = [{ marker: "", fragments: [] }];
+  let position = 0;
+  function append(fragment) {
+    frames[frames.length - 1].fragments.push(fragment);
+  }
+  function closeFrame() {
+    const frame = frames.pop();
+    const tag = frame.marker === "**" ? "strong" : "em";
+    append(`<${tag}>${frame.fragments.join("")}</${tag}>`);
+  }
+  while (position < text.length) {
+    const character = text[position];
+    if (character === "\\" && /[\\`*]/.test(text[position + 1] ?? "")) {
+      append(escapeText(text[position + 1]));
+      position += 2;
+      continue;
+    }
+    if (character === "`") {
+      const length = markerRun(text, position, "`");
+      const close = length === 1 ? closingBacktick(text, position + 1) : -1;
+      if (close !== -1) {
+        append(`<code>${escapeText(text.slice(position + 1, close))}</code>`);
+        position = close + 1;
+      } else {
+        append("`".repeat(length));
+        position += length;
+      }
+      continue;
+    }
+    if (character === "*") {
+      const length = markerRun(text, position, "*");
+      const previous = text[position - 1];
+      const next = text[position + length];
+      const canClose = previous !== undefined && !/\s/.test(previous);
+      const canOpen = next !== undefined && !/\s/.test(next);
+      let remaining = length;
+      while (canClose && frames.length > 1) {
+        const frame = frames[frames.length - 1];
+        if (frame.marker.length > remaining) {
+          break;
+        }
+        remaining -= frame.marker.length;
+        closeFrame();
+      }
+      if (canOpen && remaining > 0 && remaining <= 3) {
+        if (remaining >= 2) {
+          frames.push({ marker: "**", fragments: [] });
+          remaining -= 2;
+        }
+        if (remaining === 1) {
+          frames.push({ marker: "*", fragments: [] });
+          remaining--;
+        }
+      }
+      append("*".repeat(remaining));
+      position += length;
+      continue;
+    }
+    append(escapeText(character));
+    position++;
+  }
+  while (frames.length > 1) {
+    const frame = frames.pop();
+    append(frame.marker + frame.fragments.join(""));
+  }
+  return frames[0].fragments.join("");
+}
+
+// viewer/src/navigation.ts
+class ReadingMemory {
+  positions = new Map;
+  key(stepId, path, overview) {
+    return JSON.stringify([stepId, overview ? "changes" : "file", overview ? "" : path]);
+  }
+  save(stepId, position) {
+    const key = this.key(stepId, position.path, position.mode === "changes");
+    this.positions.set(key, this.copy(position));
+  }
+  file(stepId, path) {
+    const position = this.positions.get(this.key(stepId, path, false));
+    return position ? this.copy(position) : undefined;
+  }
+  overview(stepId) {
+    const position = this.positions.get(this.key(stepId, "", true));
+    return position ? this.copy(position) : undefined;
+  }
+  forgetFile(path) {
+    for (const [key, position] of this.positions) {
+      if (position.mode !== "changes" && position.path === path) {
+        this.positions.delete(key);
+      }
+    }
+  }
+  copy(position) {
+    return { ...position, focus: position.focus ? [...position.focus] : undefined };
+  }
 }
 
 // viewer/src/app.ts
@@ -195,6 +479,35 @@ var guideLinks = [];
 var showFiles = window.innerWidth > 560;
 var showGuide = true;
 var initialRender = true;
+var renderedSource = "";
+var readingMemory = new ReadingMemory;
+function sourceIdentity() {
+  return JSON.stringify([step, version, mode, mode === "changes" ? "" : path, expandDiff]);
+}
+function rememberPosition() {
+  if (renderedSource !== sourceIdentity() || !path && mode !== "changes") {
+    return;
+  }
+  const body = root.querySelector("#code-body");
+  readingMemory.save(steps2[step].id, {
+    path,
+    version,
+    mode,
+    focus,
+    expandDiff,
+    scrollTop: body.scrollTop,
+    scrollLeft: body.scrollLeft
+  });
+}
+function applyPosition(position) {
+  path = position.path;
+  version = position.version;
+  mode = position.mode;
+  focus = position.focus;
+  expandDiff = position.expandDiff;
+}
+var changeRegions = [];
+var stepChangesCache = new Map;
 function escape(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
@@ -248,8 +561,14 @@ async function read(filePath, view, at = step) {
   if (view !== "step") {
     return readBlob(file, view);
   }
-  const [base, head] = await Promise.all([readBlob(file, "base"), readBlob(file, "head")]);
-  return sourceAtStep(filePath, at, base, head);
+  const change = changeAt(filePath, at);
+  if (change === null) {
+    return;
+  }
+  if (change && "text" in change) {
+    return normalize(change.text);
+  }
+  return readBlob(file, change ? "head" : "base");
 }
 function revealPath(filePath) {
   const segments = filePath.split("/");
@@ -268,15 +587,16 @@ function existsInView(filePath) {
   return Boolean(file && fileExists(file, step, version));
 }
 function reconcileSelection() {
-  if (path && !existsInView(path)) {
-    path = existsInView(steps2[step].file) ? steps2[step].file : tabs.findLast(existsInView) ?? "";
-    focus = undefined;
-  }
-  if (path) {
+  if (path && mode !== "changes") {
     revealPath(path);
   }
 }
 function changeVersion(next) {
+  rememberPosition();
+  if (mode === "changes") {
+    path = steps2[step].file ?? Object.keys(steps2[step].changes ?? {})[0] ?? "";
+    mode = "file";
+  }
   version = next;
   focus = undefined;
   expandDiff = false;
@@ -333,7 +653,7 @@ function renderShell() {
         <div class="tabs" id="tabs"></div>
         <div class="file-bar">
           <span id="file-path"></span>
-          <button type="button" class="text-button" data-action="return">Return to step’s code</button>
+          <button type="button" class="text-button" data-action="step-file" hidden>Open focused file</button>
         </div>
         <div class="code-toolbar">
           <div class="view-buttons">
@@ -343,6 +663,7 @@ function renderShell() {
           <a id="github-source" target="_blank" rel="noreferrer">GitHub ↗</a>
         </div>
         <div class="version-note" id="version-note"></div>
+        <nav class="change-nav" id="change-nav" aria-label="Changes introduced in this step" hidden></nav>
         <div class="code-body" id="code-body">
           <p class="loading">Loading source…</p>
         </div>
@@ -350,7 +671,9 @@ function renderShell() {
       </main>
       <aside class="guide-pane" aria-label="Step-by-step walkthrough">
         <div class="guide-top">
-          <span>Walkthrough</span>
+          <div class="guide-heading"><span>Walkthrough</span>
+            <button type="button" class="return-step" data-action="return" title="Restore this step’s starting view">↩ Return to step</button>
+          </div>
           <label>
             <span class="sr-only">Choose a step</span>
             <select id="step-select">${stepOptions}</select>
@@ -480,7 +803,7 @@ function renderTree() {
   root.querySelector("#file-tree").innerHTML = matches.length ? renderTreeChildren(tree) : '<p class="empty-tree">No matching files.</p>';
 }
 function renderTab(filePath) {
-  const active = filePath === path;
+  const active = mode !== "changes" && filePath === path;
   const escapedPath = escape(filePath);
   const fileName = escape(filePath.split("/").at(-1));
   return `
@@ -488,7 +811,7 @@ function renderTab(filePath) {
       <button
         type="button"
         class="tab-label"
-        data-file="${escapedPath}"
+        data-tab="${escapedPath}"
         title="${escapedPath}"
         ${active ? 'aria-current="page"' : ""}
       >${fileName}</button>
@@ -503,9 +826,11 @@ function renderTab(filePath) {
   `;
 }
 function renderTabs() {
-  root.querySelector("#tabs").innerHTML = tabs.filter(existsInView).map(renderTab).join("");
+  const overview = Object.keys(steps2[step].changes ?? {}).length ? `<div class="tab ${mode === "changes" ? "active" : ""}"><button type="button" class="tab-label" data-action="overview" ${mode === "changes" ? 'aria-current="page"' : ""}>This step’s changes</button></div>` : "";
+  root.querySelector("#tabs").innerHTML = overview + tabs.filter((filePath) => existsInView(filePath) || filePath === path || readingMemory.file(steps2[step].id, filePath)).map(renderTab).join("");
 }
 async function closeTab(filePath) {
+  rememberPosition();
   const visible = tabs.filter(existsInView);
   const visibleIndex = visible.indexOf(filePath);
   const index = tabs.indexOf(filePath);
@@ -513,16 +838,19 @@ async function closeTab(filePath) {
     return;
   }
   tabs.splice(index, 1);
-  if (filePath !== path) {
+  readingMemory.forgetFile(filePath);
+  if (filePath !== path || mode === "changes") {
     renderTabs();
     return;
   }
+  renderedSource = "";
   const remaining = visible.filter((tab) => tab !== filePath);
   const adjacent = remaining[Math.min(visibleIndex, remaining.length - 1)];
   if (adjacent) {
-    await openFile(adjacent);
+    await openTab(adjacent, false);
   } else {
     path = "";
+    mode = "file";
     focus = undefined;
     renderTabs();
     renderTree();
@@ -534,16 +862,17 @@ async function closeTab(filePath) {
 }
 function renderPart(part) {
   if (typeof part === "string") {
-    return escape(part);
+    return renderInline(part);
   }
   const index = guideLinks.push(part) - 1;
-  const hash = makeLocation(step, part.path, part.version ?? "step");
+  const range = part.start ? [part.start, part.end ?? part.start] : undefined;
+  const hash = makeLocation(step, part.path, part.version ?? "step", range, part.view === "changes" ? "changes" : "file", part);
   const title = escape(part.path) + (part.version === "head" ? " · final change" : "");
   return `<a
     href="${escape(hash)}"
     data-source="${index}"
     title="${title}"
-  >${escape(part.label)}</a>`;
+  >${renderInline(part.label)}</a>`;
 }
 function renderGuide() {
   guideLinks = [];
@@ -560,9 +889,9 @@ function renderGuide() {
   next.textContent = step === steps2.length - 1 ? "Start again" : "Next →";
   root.querySelector("#announcement").textContent = `Step ${step + 1}: ${steps2[step].title}`;
 }
-function renderCodeRow(row, isDiff) {
-  const selectedLine = row.next !== undefined && focus && row.next >= focus[0] && row.next <= focus[1];
-  const lineAttribute = row.next ? `data-line="${row.next}"` : "";
+function renderCodeRow(row, isDiff, filePath = path, selection = focus) {
+  const selectedLine = row.next !== undefined && selection && row.next >= selection[0] && row.next <= selection[1];
+  const lineAttribute = `${row.next ? `data-line="${row.next}"` : ""} ${row.old ? `data-old-line="${row.old}"` : ""}`;
   const oldNumber = isDiff ? `<span class="line-number old" aria-hidden="true">${row.old ?? ""}</span>` : "";
   let changeSign = "";
   if (row.kind === "add") {
@@ -578,7 +907,7 @@ function renderCodeRow(row, isDiff) {
     oldNumber,
     `<span class="line-number" aria-hidden="true">${row.next ?? ""}</span>`,
     `<span class="change-sign" aria-hidden="true">${changeSign}</span>`,
-    `<code>${highlight(row.text, path) || " "}</code>`,
+    `<code>${highlight(row.text, filePath) || " "}</code>`,
     "</div>"
   ].join("");
 }
@@ -670,7 +999,7 @@ function renderFilePlaceholder(selectedFile) {
 }
 function fullFileRows(sourceLines, previous, current) {
   let addedLines = new Set;
-  if (version === "step" && path === steps2[step].file) {
+  if (version === "step") {
     try {
       addedLines = new Set(diffLines(previous, current).filter((row) => row.kind === "add").map((row) => row.next));
     } catch (error) {
@@ -699,21 +1028,130 @@ function codeStatus(lineCount) {
   }
   return status;
 }
-async function renderCode() {
+function regionLabel(rows) {
+  const changed = rows.filter((row) => row.kind !== "same");
+  const added = changed.flatMap((row) => row.next === undefined ? [] : [row.next]);
+  const removed = changed.flatMap((row) => row.old === undefined ? [] : [row.old]);
+  const context = rows.flatMap((row) => row.next === undefined ? [] : [row.next]);
+  const numbers = added.length ? added : removed.length ? removed : context;
+  const range = numbers.length > 1 ? `${numbers[0]}–${numbers.at(-1)}` : `${numbers[0]}`;
+  return `${added.length ? "Lines" : removed.length ? "Removed lines" : "Context lines"} ${range}`;
+}
+function loadStepChanges(at) {
+  const cached = stepChangesCache.get(at);
+  if (cached) {
+    return cached;
+  }
+  const pending = prepareStepChanges(Object.keys(steps2[at].changes ?? {}), at, async (filePath, index) => ({
+    exists: fileExists(files.get(filePath), index, "step"),
+    text: await read(filePath, "step", index)
+  }), steps2[at].paragraphs.flat().filter((part) => typeof part !== "string" && part.view === "changes")).then((changes) => {
+    if (changes.some((change) => change.failed)) {
+      stepChangesCache.delete(at);
+    }
+    const entries = changes.map((change, fileIndex) => {
+      const filePath = change.path;
+      const readingVersion = change.kind === "deleted" ? "base" : "step";
+      const regions = [];
+      let content = "";
+      if (change.notice) {
+        const retry = change.failed ? '<button type="button" data-action="retry">Retry</button>' : "";
+        content = `<p class="code-message">${escape(change.notice)} ${retry}</p>`;
+      } else {
+        content = change.regions.map((region, regionIndex) => {
+          const id = `change-${fileIndex}-${regionIndex}`;
+          const label = regionLabel(region.rows);
+          regions.push({ id, path: filePath, label });
+          return `<section class="change-region" id="${id}" tabindex="-1" aria-label="${escape(filePath + ": " + label)}">
+            <div class="region-heading">${escape(label)}</div>
+            ${region.rows.map((row) => renderCodeRow(row, true, filePath, null)).join("")}
+          </section>`;
+        }).join("");
+      }
+      const sectionId = `change-file-${fileIndex}`;
+      if (!regions.length) {
+        regions.push({ id: sectionId, path: filePath, label: "File change" });
+      }
+      return {
+        regions,
+        html: `<article class="change-file" id="${sectionId}" data-change-path="${escape(filePath)}" tabindex="-1">
+        <header class="change-file-heading"><strong>${escape(filePath)}</strong>
+          <button type="button" data-change-file="${escape(filePath)}" data-view="${readingVersion}">${change.kind === "deleted" ? "Before change" : "Full file"}</button>
+        </header>${content}</article>`
+      };
+    });
+    return {
+      html: entries.map((entry) => entry.html).join(""),
+      regions: entries.flatMap((entry) => entry.regions)
+    };
+  }).catch((error) => {
+    stepChangesCache.delete(at);
+    throw error;
+  });
+  stepChangesCache.set(at, pending);
+  return pending;
+}
+function renderChangeNavigation() {
+  const nav = root.querySelector("#change-nav");
+  nav.hidden = changeRegions.length === 0;
+  const fileCount = new Set(changeRegions.map((region) => region.path)).size;
+  nav.innerHTML = `<span class="change-summary">This step: ${fileCount} ${fileCount === 1 ? "file" : "files"} · ${changeRegions.length} ${changeRegions.length === 1 ? "region" : "regions"}</span>
+    <div class="change-targets">${changeRegions.map((region, index) => `<button type="button" data-region="${index}" title="${escape(region.path + ": " + region.label)}">${escape(region.path.split("/").at(-1))} · ${escape(region.label)}</button>`).join("")}</div>`;
+}
+function revealFocus(body) {
+  if (!focus) {
+    return;
+  }
+  const source = mode === "changes" ? changeArticle(path) : body;
+  const selected = Array.from(source?.querySelectorAll("[data-line]") ?? []).filter((row) => {
+    const line = Number(row.dataset.line);
+    return line >= focus[0] && line <= focus[1];
+  });
+  const first = selected[0];
+  const last = selected.at(-1);
+  if (!first || !last) {
+    return;
+  }
+  const inset = mode === "changes" ? source.querySelector(".change-file-heading").offsetHeight : 0;
+  const bodyTop = body.getBoundingClientRect().top + body.clientTop;
+  const top = first.getBoundingClientRect().top - bodyTop + body.scrollTop;
+  const bottom = last.getBoundingClientRect().bottom - bodyTop + body.scrollTop;
+  body.scrollTop = Math.max(0, focusScrollTop(body.scrollTop + inset, body.clientHeight - inset, top, bottom) - inset);
+}
+function changeArticle(filePath) {
+  return Array.from(root.querySelectorAll("[data-change-path]")).find((article) => article.dataset.changePath === filePath);
+}
+function markOverviewFocus() {
+  root.querySelectorAll("#code-body .line-focus").forEach((line) => line.classList.remove("line-focus"));
+  if (!focus || !path) {
+    return;
+  }
+  changeArticle(path)?.querySelectorAll("[data-line]").forEach((line) => {
+    const number = Number(line.dataset.line);
+    line.classList.toggle("line-focus", number >= focus[0] && number <= focus[1]);
+  });
+}
+async function renderCode(position = {}) {
   const ticket = ++requestId;
-  root.querySelector(".code-pane").classList.toggle("no-file", !path);
-  if (!path) {
-    root.querySelector("#code-body").innerHTML = `<p class="code-message">Select a file in the browser, or <button
-      type="button"
-      class="text-button"
-      data-action="return"
-    >return to this step’s code</button>.</p>`;
-    root.querySelector("#code-status").textContent = "";
+  const body = root.querySelector("#code-body");
+  const sourceKey = sourceIdentity();
+  const savedScroll = position.scrollTop ?? (renderedSource === sourceKey ? body.scrollTop : 0);
+  const savedHorizontal = position.scrollLeft ?? (renderedSource === sourceKey ? body.scrollLeft : 0);
+  const overview = mode === "changes";
+  root.querySelector('[data-action="step-file"]').hidden = !overview || !steps2[step].file;
+  root.querySelector(".code-pane").classList.toggle("no-file", !path && !overview);
+  root.querySelector(".code-pane").classList.toggle("show-changes", overview);
+  root.querySelector("#version").value = version;
+  root.querySelector("#code-status").textContent = "";
+  if (!path && !overview) {
+    body.innerHTML = '<p class="code-message">Open a source reference or choose a file to explore.</p>';
+    changeRegions = [];
+    renderChangeNavigation();
+    renderedSource = sourceKey;
     return;
   }
   const selectedFile = files.get(path);
-  root.querySelector("#file-path").textContent = path;
-  root.querySelector("#version").value = version;
+  root.querySelector("#file-path").textContent = overview ? "Changes introduced in this step" : path;
   root.querySelectorAll("[data-mode]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.mode === mode)));
   root.querySelector('[data-mode="diff"]').textContent = version === "step" ? "Step diff" : "Change diff";
   root.querySelector("#version-note").textContent = versionDescription();
@@ -723,20 +1161,44 @@ async function renderCode() {
     github.href = manifest.sourceUrl;
   }
   github.textContent = "Change source ↗";
-  root.querySelector("#code-status").textContent = "";
-  const body = root.querySelector("#code-body");
-  body.innerHTML = '<p class="loading">Loading source…</p>';
+  if (renderedSource !== sourceKey) {
+    body.innerHTML = '<p class="loading">Loading source…</p>';
+  }
   try {
+    const pendingChanges = loadStepChanges(step);
+    if (overview) {
+      const changes = await pendingChanges;
+      if (ticket !== requestId) {
+        return;
+      }
+      changeRegions = changes.regions;
+      renderChangeNavigation();
+      body.innerHTML = changes.html;
+      markOverviewFocus();
+      body.scrollTop = savedScroll;
+      body.scrollLeft = savedHorizontal;
+      renderedSource = sourceKey;
+      root.querySelector("#code-status").textContent = "All changes in this step · Compared with the preceding state" + (focus && path ? ` · Selected ${path}:${focus[0]}–${focus[1]}` : "");
+      if (position.reveal !== false) {
+        revealFocus(body);
+      }
+      return;
+    }
+    pendingChanges.then((changes) => {
+      if (ticket === requestId) {
+        changeRegions = changes.regions;
+        renderChangeNavigation();
+      }
+    }).catch(() => {});
     const currentText = await read(path, version);
     if (ticket !== requestId) {
       return;
     }
-    if (currentText === undefined) {
+    const deletedDiff = mode === "diff" && selectedFile && !fileExists(selectedFile, step, version);
+    if (currentText === undefined && !deletedDiff) {
       body.innerHTML = renderFilePlaceholder(selectedFile);
+      renderedSource = sourceKey;
       return;
-    }
-    if (!focus && version === "step" && path === steps2[step].file) {
-      focus = resolveFocus(currentText, steps2[step]);
     }
     let previous;
     if (version === "step" && step > 0) {
@@ -747,25 +1209,25 @@ async function renderCode() {
     if (ticket !== requestId) {
       return;
     }
-    const sourceLines = currentText.split(`
+    const sourceLines = (currentText ?? "").split(`
 `);
     let rows;
     if (mode === "diff") {
-      rows = diffLines(previous ?? "", currentText);
+      rows = diffLines(previous ?? "", currentText ?? "");
     } else {
-      rows = fullFileRows(sourceLines, previous ?? "", currentText);
+      rows = fullFileRows(sourceLines, previous ?? "", currentText ?? "");
     }
     body.innerHTML = renderRows(rows, mode === "diff");
     root.querySelector("#code-status").textContent = codeStatus(sourceLines.length);
-    body.scrollTop = 0;
+    body.scrollTop = savedScroll;
+    body.scrollLeft = savedHorizontal;
+    renderedSource = sourceKey;
     requestAnimationFrame(() => {
-      if (ticket !== requestId || !focus) {
+      if (ticket !== requestId) {
         return;
       }
-      const target = body.querySelector(`[data-line="${focus[0]}"]`) ?? body.querySelector(".line-focus");
-      if (target) {
-        const lineTop = target.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
-        body.scrollTop = Math.max(0, lineTop - 48);
+      if (position.reveal !== false) {
+        revealFocus(body);
       }
     });
   } catch (error) {
@@ -781,6 +1243,7 @@ async function renderCode() {
   }
 }
 async function openFile(filePath, target, record = true) {
+  rememberPosition();
   path = filePath;
   if (target) {
     version = target.version ?? "step";
@@ -807,32 +1270,162 @@ async function openFile(filePath, target, record = true) {
         focus = resolveFocus(text, target);
       }
     } catch {}
+    if (pending !== requestId) {
+      return;
+    }
   }
   if (record) {
     updateLocation();
   }
   await renderCode();
 }
+async function openTab(filePath, remember = true) {
+  if (remember) {
+    rememberPosition();
+  }
+  const position = readingMemory.file(steps2[step].id, filePath);
+  if (!position) {
+    await openFile(filePath);
+    return;
+  }
+  applyPosition(position);
+  reconcileSelection();
+  renderTree();
+  renderTabs();
+  updateLocation();
+  await renderCode({ ...position, reveal: false });
+}
+async function openOverview() {
+  rememberPosition();
+  const position = readingMemory.overview(steps2[step].id);
+  if (position) {
+    applyPosition(position);
+  } else {
+    path = "";
+    version = "step";
+    mode = "changes";
+    focus = undefined;
+    expandDiff = false;
+  }
+  renderTree();
+  renderTabs();
+  updateLocation();
+  await renderCode({ ...position, reveal: false });
+}
+async function openPointer(target) {
+  if (target.view !== "changes") {
+    await openFile(target.path, target);
+    return;
+  }
+  rememberPosition();
+  path = target.path;
+  version = "step";
+  mode = "changes";
+  focus = undefined;
+  expandDiff = false;
+  const pending = ++requestId;
+  try {
+    const text = await read(path, "step");
+    if (pending !== requestId) {
+      return;
+    }
+    if (text !== undefined) {
+      focus = resolveFocus(text, target);
+    }
+  } catch {}
+  if (pending !== requestId) {
+    return;
+  }
+  renderTree();
+  renderTabs();
+  updateLocation();
+  await renderCode();
+}
+async function openFullFile(button) {
+  const filePath = button.dataset.changeFile;
+  const selectedVersion = button.dataset.view;
+  const article = changeArticle(filePath);
+  const body = root.querySelector("#code-body");
+  const header = article?.querySelector(".change-file-heading");
+  const visibleTop = Math.max(body.getBoundingClientRect().top, header?.getBoundingClientRect().bottom ?? 0);
+  const visibleBottom = body.getBoundingClientRect().bottom;
+  const visibleRows = Array.from(article?.querySelectorAll(".code-line[data-line]") ?? []).filter((row) => row.getBoundingClientRect().bottom > visibleTop && row.getBoundingClientRect().top < visibleBottom);
+  const first = visibleRows.find((row) => row.classList.contains("add")) ?? visibleRows[0];
+  const line = selectedVersion === "step" && first ? Number(first.dataset.line) : undefined;
+  await openFile(filePath, {
+    label: "",
+    path: filePath,
+    version: selectedVersion,
+    start: line
+  });
+}
 async function goStep(index, record = true) {
+  rememberPosition();
   step = Math.max(0, Math.min(steps2.length - 1, index));
+  renderedSource = "";
   const choice = defaultSelection(steps2[step]);
   version = choice.version;
+  changeRegions = [];
+  renderChangeNavigation();
   renderGuide();
-  await openFile(choice.path, {
-    label: "",
-    path: choice.path,
-    version: choice.version,
-    symbol: steps2[step].symbol,
-    count: steps2[step].count,
-    start: steps2[step].focus?.[0],
-    end: steps2[step].focus?.[1]
-  }, record);
+  if (choice.mode === "changes" || !choice.path) {
+    path = "";
+    mode = choice.mode;
+    focus = undefined;
+    expandDiff = false;
+    renderTree();
+    renderTabs();
+    if (record) {
+      updateLocation();
+    }
+    await renderCode();
+  } else {
+    await openFile(choice.path, {
+      label: "",
+      path: choice.path,
+      version: choice.version,
+      symbol: steps2[step].symbol,
+      count: steps2[step].count,
+      start: steps2[step].focus?.[0],
+      end: steps2[step].focus?.[1]
+    }, record);
+  }
   if (!initialRender) {
     const heading = root.querySelector("#guide-title");
     heading.tabIndex = -1;
     heading.focus({ preventScroll: true });
   }
   initialRender = false;
+}
+async function openRegion(index) {
+  const region = changeRegions[index];
+  if (!region) {
+    return;
+  }
+  const at = step;
+  if (mode !== "changes") {
+    const pending = openOverview();
+    const ticket = requestId;
+    await pending;
+    if (ticket !== requestId) {
+      return;
+    }
+  }
+  if (step !== at || mode !== "changes") {
+    return;
+  }
+  const body = root.querySelector("#code-body");
+  focus = undefined;
+  path = "";
+  markOverviewFocus();
+  updateLocation();
+  const target = document.getElementById(region.id);
+  if (target) {
+    const inset = target.closest(".change-file")?.querySelector(".change-file-heading")?.offsetHeight ?? 0;
+    const top = target.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
+    body.scrollTop = Math.max(0, focusScrollTop(body.scrollTop + inset, body.clientHeight - inset, top, top + target.offsetHeight) - inset);
+    target.focus({ preventScroll: true });
+  }
 }
 function handleClick(event) {
   const element = event.target.closest("button, a[data-source]");
@@ -843,13 +1436,25 @@ function handleClick(event) {
     closeTab(element.dataset.closeFile);
     return;
   }
+  if (element.dataset.region !== undefined) {
+    openRegion(Number(element.dataset.region));
+    return;
+  }
+  if (element.dataset.changeFile) {
+    openFullFile(element);
+    return;
+  }
   if (element.dataset.source !== undefined) {
     if (event.ctrlKey || event.metaKey) {
       return;
     }
     event.preventDefault();
     const link = guideLinks[Number(element.dataset.source)];
-    openFile(link.path, link);
+    openPointer(link);
+    return;
+  }
+  if (element.dataset.tab) {
+    openTab(element.dataset.tab);
     return;
   }
   if (element.dataset.file) {
@@ -867,9 +1472,11 @@ function handleClick(event) {
     return;
   }
   if (element.dataset.mode) {
+    rememberPosition();
     mode = element.dataset.mode;
     expandDiff = false;
     updateLocation();
+    renderTabs();
     renderCode();
     return;
   }
@@ -881,16 +1488,26 @@ function handleClick(event) {
       goStep(step - 1);
       break;
     case "return":
-      openFile(steps2[step].file, {
-        label: "",
-        path: steps2[step].file,
-        symbol: steps2[step].symbol,
-        count: steps2[step].count,
-        start: steps2[step].focus?.[0],
-        end: steps2[step].focus?.[1],
-        version: steps2[step].version ?? "step"
-      });
+      goStep(step);
       break;
+    case "overview":
+      openOverview();
+      break;
+    case "step-file": {
+      const target = steps2[step];
+      if (target.file) {
+        openFile(target.file, {
+          label: "",
+          path: target.file,
+          version: target.version ?? "step",
+          start: target.focus?.[0],
+          end: target.focus?.[1],
+          symbol: target.symbol,
+          count: target.count
+        });
+      }
+      break;
+    }
     case "final-file":
       changeVersion("head");
       break;
@@ -913,25 +1530,54 @@ function handleClick(event) {
       break;
   }
 }
-function restoreLocation() {
+async function resolveLocationAnchor(target) {
+  const pending = ++requestId;
+  if (focus || !path || !target.symbol) {
+    return true;
+  }
+  try {
+    const text = await read(path, version);
+    if (pending !== requestId) {
+      return false;
+    }
+    if (text !== undefined) {
+      focus = resolveFocus(text, target);
+    }
+  } catch {}
+  return pending === requestId;
+}
+async function restoreLocation() {
   if (!manifest) {
     return;
   }
   const state = parseLocation(location.hash);
+  rememberPosition();
   step = state.step;
+  if (state.path === undefined && state.mode === undefined) {
+    goStep(step, false);
+    return;
+  }
+  const choice = defaultSelection(steps2[step]);
   if (state.path === "" || state.path && files.has(state.path)) {
     path = state.path;
   } else {
-    path = steps2[step].file;
+    path = choice.path;
   }
-  version = state.version ?? "step";
+  version = state.version ?? choice.version;
   focus = state.focus;
-  mode = state.mode ?? "file";
+  mode = state.mode ?? (state.path === undefined ? choice.mode : "file");
+  if (mode === "changes") {
+    version = "step";
+  }
+  changeRegions = [];
+  renderChangeNavigation();
   reconcileSelection();
   renderTree();
   renderTabs();
   renderGuide();
-  renderCode();
+  if (await resolveLocationAnchor(state)) {
+    await renderCode();
+  }
 }
 async function initialize() {
   const response = await fetch("/manifest.json");
@@ -952,13 +1598,17 @@ async function initialize() {
   document.title = lesson.title + " · Code walkthrough";
   const initial = parseLocation(location.hash);
   step = initial.step;
-  path = initial.path ?? steps2[step].file;
-  version = initial.version ?? "step";
+  const choice = defaultSelection(steps2[step]);
+  path = initial.path ?? choice.path;
+  version = initial.version ?? choice.version;
   focus = initial.focus;
-  mode = initial.mode ?? "file";
+  mode = initial.mode ?? (initial.path === undefined ? choice.mode : "file");
   files = new Map(manifest.files.map((file) => [file.path, file]));
   if (path && !files.has(path)) {
-    path = steps2[step].file;
+    path = choice.path;
+  }
+  if (mode === "changes") {
+    version = "step";
   }
   reconcileSelection();
   renderShell();
@@ -967,14 +1617,18 @@ async function initialize() {
   renderGuide();
   root.classList.toggle("hide-files", !showFiles);
   root.querySelector('[data-action="files"]').setAttribute("aria-pressed", String(showFiles));
-  if (initial.path !== undefined) {
-    await renderCode();
+  if (initial.path !== undefined || initial.mode !== undefined) {
+    if (await resolveLocationAnchor(initial)) {
+      await renderCode();
+    }
   } else {
     await goStep(step, false);
   }
 }
 root.addEventListener("click", handleClick);
-window.addEventListener("hashchange", restoreLocation);
+window.addEventListener("hashchange", () => {
+  restoreLocation();
+});
 try {
   await initialize();
 } catch (error) {

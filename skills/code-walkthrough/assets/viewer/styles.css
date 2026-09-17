@@ -22,9 +22,9 @@
   --red: #cf222e;
   --added: #dafbe1;
   --removed: #ffebe9;
-  --focus-bg: #fff8c5;
-  --focus-border: #bf8700;
-  --added-focus: #d3f5d9;
+  --focus-bg: #e7f1ff;
+  --added-focus: #bce9c8;
+  --removed-focus: #ffd0cd;
   --keyword: #cf222e;
   --string: #0a3069;
   --number: #0550ae;
@@ -54,9 +54,9 @@
     --red: #ff7b72;
     --added: #122b1c;
     --removed: #35191b;
-    --focus-bg: #352e15;
-    --focus-border: #d29922;
-    --added-focus: #1b3b27;
+    --focus-bg: #1c2c40;
+    --added-focus: #23472e;
+    --removed-focus: #55282d;
     --keyword: #ff7b72;
     --string: #a5d6ff;
     --number: #79c0ff;
@@ -532,6 +532,99 @@ button:hover {
   display: none;
 }
 
+.code-pane.show-changes .code-toolbar,
+.code-pane.show-changes .file-bar > [data-action="return"] {
+  display: none;
+}
+
+.code-pane.show-changes .code-body {
+  /* Scroll the initial spacing away so sticky headers reach the viewport edge. */
+  padding-top: 0;
+}
+
+/* Keep the complete step's file/region inventory visible above the code scroll.
+   Its height is bounded so a large scope still leaves room to read the changes. */
+.change-nav {
+  padding: 9px 15px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.change-nav[hidden] {
+  display: none;
+}
+
+.change-summary {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+}
+
+.change-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-height: 90px;
+  overflow: auto;
+}
+
+.change-targets button {
+  font-size: 11px;
+  padding: 3px 7px;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.change-file {
+  margin: 0 12px 20px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  /* Do not create a scrolling ancestor: the header sticks inside code-body. */
+  overflow: visible;
+}
+
+.change-file:first-child {
+  margin-top: 12px;
+}
+
+.change-file-heading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 1px 0 var(--border);
+}
+
+.change-file-heading strong {
+  flex: 1;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.change-file-heading button {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.region-heading {
+  padding: 6px 12px;
+  background: var(--selected);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.change-region + .change-region {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
 .code-line {
   display: flex;
   width: 100%;
@@ -592,12 +685,16 @@ button:hover {
 
 .code-line.line-focus {
   background: var(--focus-bg);
-  border-left-color: var(--focus-border);
+  border-left-color: var(--blue);
+  box-shadow: inset 2px 0 var(--blue);
 }
 
 .code-line.add.line-focus {
   background: var(--added-focus);
-  border-left-color: var(--green);
+}
+
+.code-line.remove.line-focus {
+  background: var(--removed-focus);
 }
 
 .keyword {
@@ -654,11 +751,27 @@ button:hover {
   background: var(--surface);
 }
 
-.guide-top > span {
-  display: block;
+.guide-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+
+.guide-heading > span {
   font-size: 12px;
   color: var(--muted);
-  margin-bottom: 9px;
+}
+
+.return-step {
+  flex-shrink: 0;
+  border-color: var(--blue);
+  color: var(--blue);
+  background: var(--selected);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 9px;
 }
 
 .guide-top select {
@@ -696,6 +809,24 @@ button:hover {
 .guide-content a {
   text-underline-offset: 3px;
   text-decoration-thickness: 1px;
+}
+
+.guide-content code {
+  font:
+    0.86em/1.5 ui-monospace,
+    "Cascadia Code",
+    Consolas,
+    monospace;
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.guide-content strong {
+  font-weight: 650;
 }
 
 .guide-footer {
@@ -843,8 +974,12 @@ button:hover {
     padding: 8px 15px;
   }
 
-  .guide-top > span {
+  .guide-heading {
     margin: 0;
+  }
+
+  .guide-heading > span {
+    display: none;
   }
 
   .guide-top > label {

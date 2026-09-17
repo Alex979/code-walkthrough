@@ -2,7 +2,11 @@
 
 A portable skill for turning a Git change into a guided code lesson. It captures source once and opens a consistent local viewer with a full repository tree, source tabs, a guide panel, system dark mode, and fixed navigation.
 
-The agent writes `lesson.json`. It does not generate a new website for each walkthrough. Each lesson starts from the captured baseline, introduces changes in a useful teaching order, and finishes at the exact captured head.
+The agent writes `lesson.json`. It does not generate a new website for each walkthrough. Each lesson starts from the captured baseline, introduces small changes while explaining them, and finishes at the exact captured head. Files can be revisited as the implementation grows.
+
+Build steps open a compact comparison with the preceding step, showing every changed file and region. A persistent region index and sticky filename headers make separated edits visible. Guide pointers can highlight exact lines inside those diffs, including authored context such as an enclosing method declaration. Full files, source tabs, and the repository tree remain available for exploration.
+
+Context steps can start with an empty code pane or a selected source passage. Guide text supports inline code, bold, and emphasis. Links can point precisely at code already on screen or open optional references; the main walkthrough remains complete using Next alone. Tabs remember their source version, selection, and scroll position within each step. **Return to step** restores the authored starting view, while **Full file** opens near the diff currently being read.
 
 ## Quickstart
 
@@ -14,7 +18,7 @@ To try the bundled synthetic example immediately:
 bun skills/code-walkthrough/scripts/serve.ts skills/code-walkthrough/examples/greeting --port 4318
 ```
 
-The example also demonstrates the expected prose and source links. Its repository label is portable; its source snapshots come from a tiny synthetic Git repository.
+The example demonstrates a blank introduction, partial edits, and returning to the same files to add behavior. Its repository label is portable; its source snapshots come from a tiny synthetic Git repository.
 
 Run these commands from this repository's root. `PATH` is the repository to explain; `ARTIFACT` is a new output directory **outside that repository**.
 

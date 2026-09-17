@@ -31,10 +31,16 @@ export interface Manifest {
   files: FileInfo[];
 }
 
-/** A link opens a full file, optionally selecting a location within it. */
+/** A source reference or an optional pointer into changes already shown by the step. */
 export interface SourceLink {
+  /** Supports the same safe inline formatting as paragraph strings. */
   label: string;
   path: string;
+  /**
+   * Omission or "file" opens a full file. "changes" points inside this step's
+   * change overview; it requires an anchor, a changed path, and version "step".
+   */
+  view?: "file" | "changes";
   /** One-based, inclusive line bounds; use these or symbol/count, not both. */
   start?: number;
   end?: number;
@@ -45,6 +51,7 @@ export interface SourceLink {
   version?: Version;
 }
 
+/** Strings and link labels support `code`, **strong**, and *emphasis*. */
 export type Part = string | SourceLink;
 
 /**
@@ -57,13 +64,16 @@ export interface Step {
   id: string;
   title: string;
   paragraphs: Part[][];
-  file: string;
-  /** One-based, inclusive bounds in this step's selected version. */
+  /** Optional full-file reading target; build steps open their complete change overview. */
+  file?: string;
+  /** One-based, inclusive bounds in this step's selected version. Requires file. */
   focus?: [number, number];
+  /** A literal source anchor in file; use this or focus, not both. */
   symbol?: string;
   count?: number;
+  /** The reading target's source version. Requires file; defaults to "step". */
   version?: Version;
-  /** Applied before the step's default file and prose links are resolved. */
+  /** Applied before the step's reading target and optional prose links are resolved. */
   changes?: Record<string, Change>;
 }
 

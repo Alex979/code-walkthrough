@@ -312,6 +312,199 @@ describe("binary and mode metadata", () => {
 });
 
 describe("selected versions, prose source links and focus", () => {
+  test("accepts change pointers to current source and unchanged enclosing context", async () => {
+    const f = await fixture();
+    f.manifest.files[0].base = await f.blob("function answer() {\n  return 1;\n}\n");
+    f.manifest.files[0].head = await f.blob("function answer() {\n  return 2;\n}\n");
+    f.lesson.steps[0].paragraphs = [
+      [
+        { label: "`answer`", path: "main.ts", view: "changes", start: 1 },
+        {
+          label: "the return value",
+          path: "main.ts",
+          view: "changes",
+          version: "step",
+          symbol: "return 2",
+          count: 1,
+        },
+      ],
+    ];
+    expect((await f.run()).ok).toBe(true);
+  });
+
+  test("change pointers resolve after the current edit, never against later head lines", async () => {
+    const f = await fixture();
+    f.manifest.files[0].head = await f.blob("const answer = 2;\nconst future = true;\n");
+    f.lesson.steps = [
+      step({
+        id: "partial",
+        changes: { "main.ts": { text: "const answer = 2;" } },
+        paragraphs: [[{ label: "Too early", path: "main.ts", view: "changes", start: 2 }]],
+      }),
+      step(),
+    ];
+    await problems(f.run, "line range 2-2 exceeds", "step, 1 lines");
+    f.lesson.steps[0].paragraphs = [
+      [{ label: "Current value", path: "main.ts", view: "changes", symbol: "answer = 2" }],
+    ];
+    expect((await f.run()).ok).toBe(true);
+  });
+
+  test("change pointers require a current-step path and an explicit anchor", async () => {
+    const f = await fixture();
+    await f.file("context.ts", "unchanged", "unchanged");
+    f.lesson.steps[0].paragraphs = [
+      [{ label: "No anchor", path: "main.ts", view: "changes" }],
+      [{ label: "Unchanged context", path: "context.ts", view: "changes", start: 1 }],
+    ];
+    await problems(
+      f.run,
+      'view:"changes" requires a start/end or symbol/count anchor',
+      'view:"changes" requires a path in this step\'s changes',
+    );
+    f.lesson.steps.unshift({
+      id: "context",
+      title: "Read the baseline",
+      paragraphs: [[{ label: "No build", path: "main.ts", view: "changes", start: 1 }]],
+    });
+    await problems(f.run, 'lesson.steps[0].paragraphs[0][0].path: view:"changes"');
+  });
+
+  for (const version of ["base", "head"] as const) {
+    test(`rejects ${version} versions for change pointers but permits them for file references`, async () => {
+      const f = await fixture();
+      f.lesson.steps[0].paragraphs = [
+        [{ label: "Reference", path: "main.ts", view: "changes", version, start: 1 }],
+      ];
+      await problems(f.run, 'view:"changes" requires "step" or an omitted version');
+      f.lesson.steps[0].paragraphs = [
+        [{ label: "Reference", path: "main.ts", view: "file", version, start: 1 }],
+      ];
+      expect((await f.run()).ok).toBe(true);
+    });
+  }
+
+  test("rejects unknown link views", async () => {
+    const f = await fixture();
+    f.lesson.steps[0].paragraphs = [
+      [{ label: "Wrong view", path: "main.ts", view: "diff" as never, start: 1 }],
+    ];
+    await problems(f.run, '.view: expected "file" or "changes"');
+  });
+
+  test("change pointers cannot anchor deleted files or nontext placeholders", async () => {
+    const f = await fixture();
+    await f.file("gone.ts", "before", undefined);
+    await f.file("image.bin", undefined, opaque("binary"));
+    Object.assign(f.lesson.steps[0].changes!, {
+      "gone.ts": null,
+      "image.bin": { use: "head" },
+    });
+    f.lesson.steps[0].paragraphs = [
+      [{ label: "Deleted", path: "gone.ts", view: "changes", start: 1 }],
+      [{ label: "Binary", path: "image.bin", view: "changes", start: 1 }],
+    ];
+    await problems(
+      f.run,
+      '"gone.ts" does not exist in selected version "step"',
+      '"image.bin" is binary in "step"; its placeholder has no source lines',
+    );
+  });
+
+  test("permits authored pointers when an explicit change repeats existing source", async () => {
+    const f = await fixture();
+    f.lesson.steps.push(
+      step({
+        id: "revisit",
+        paragraphs: [[{ label: "Still two", path: "main.ts", view: "changes", start: 1 }]],
+      }),
+    );
+    expect((await f.run()).steps).toBe(2);
+  });
+
+  test("allows a baseline introduction without a default file and resolves optional links", async () => {
+    const f = await fixture();
+    f.lesson.steps.unshift({
+      id: "context",
+      title: "Understand the existing behavior",
+      paragraphs: [
+        ["The current value is ", { label: "one", path: "main.ts", symbol: "answer = 1" }, "."],
+      ],
+    });
+    expect((await f.run()).steps).toBe(2);
+  });
+
+  test("applies build steps without reading targets cumulatively", async () => {
+    const f = await fixture();
+    f.lesson.steps = [
+      {
+        id: "partial",
+        title: "Introduce the new value",
+        paragraphs: [["Start with the value and then complete its declaration."]],
+        changes: { "main.ts": { text: "const answer = 2" } },
+      },
+      {
+        id: "finish",
+        title: "Finish the declaration",
+        paragraphs: [["Terminate the statement."]],
+        changes: { "main.ts": { use: "head" } },
+      },
+    ];
+    expect((await f.run()).steps).toBe(2);
+  });
+
+  test("allows an empty-baseline addition without a reading target", async () => {
+    const f = await fixture();
+    delete f.manifest.files[0].base;
+    f.manifest.files[0].status = "A";
+    delete f.lesson.steps[0].file;
+    expect((await f.run()).ok).toBe(true);
+  });
+
+  test("allows a deletion-only build without selecting a now-absent file", async () => {
+    const f = await fixture();
+    delete f.manifest.files[0].head;
+    f.manifest.files[0].status = "D";
+    f.lesson.steps = [
+      {
+        id: "remove",
+        title: "Remove the obsolete declaration",
+        paragraphs: [["The declaration is no longer needed."]],
+        changes: { "main.ts": null },
+      },
+    ];
+    expect((await f.run()).ok).toBe(true);
+  });
+
+  for (const [field, value] of [
+    ["focus", [1, 1]],
+    ["symbol", "answer"],
+    ["count", 1],
+    ["version", "base"],
+  ] as const) {
+    test(`rejects ${field} without a reading target`, async () => {
+      const f = await fixture();
+      delete f.lesson.steps[0].file;
+      Object.assign(f.lesson.steps[0], { [field]: value });
+      await problems(f.run, `.${field}: requires file`);
+    });
+  }
+
+  test("omitting a reading target does not bypass change paths or source-link bounds", async () => {
+    const f = await fixture();
+    delete f.lesson.steps[0].file;
+    f.lesson.steps[0].changes!["unknown.ts"] = null;
+    f.lesson.steps[0].paragraphs = [[{ label: "Out of bounds", path: "main.ts", start: 3 }]];
+    await problems(f.run, 'changes["unknown.ts"]: unknown manifest path', "line range 3-3 exceeds");
+  });
+
+  test("omitting a reading target still requires the exact captured final state", async () => {
+    const f = await fixture();
+    delete f.lesson.steps[0].file;
+    f.lesson.steps[0].changes!["main.ts"] = { text: "const answer = 3;\n" };
+    await problems(f.run, 'final "main.ts": text differs from head bytes');
+  });
+
   test("allows base/head links independently of the current step version", async () => {
     const f = await fixture();
     await f.file("deleted.ts", "old line\n", undefined);
