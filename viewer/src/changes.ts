@@ -1,5 +1,5 @@
 import type { SourceLink } from "../../skills/code-walkthrough/scripts/types";
-import { compareLines } from "../../skills/code-walkthrough/scripts/diff";
+import { compareLines, type DiffLine } from "../../skills/code-walkthrough/scripts/diff";
 import { diffRegions, normalize, resolveFocus, type DiffRegion } from "./model";
 
 export interface SourceState {
@@ -10,13 +10,113 @@ export interface SourceState {
 
 export type SourceStateReader = (path: string, at: number) => Promise<SourceState>;
 
+export interface ChangeRegion extends DiffRegion {
+  /** This excerpt retains context from the immediately preceding build step. */
+  continued?: boolean;
+}
+
 export interface FileChange {
   path: string;
   kind: "added" | "modified" | "deleted";
-  regions: DiffRegion[];
+  regions: ChangeRegion[];
   notice?: string;
   coarse?: boolean;
   failed: boolean;
+}
+
+interface LineSpan {
+  first: number;
+  last: number;
+}
+
+/** Locate edits in either source, treating absent-side runs as insertion boundaries. */
+function editedSpans(rows: DiffLine[], side: "old" | "next"): LineSpan[] {
+  const spans: LineSpan[] = [];
+  let precedingLine = 0;
+  let active: LineSpan | undefined;
+  for (const row of rows) {
+    const line = row[side];
+    if (row.kind === "same") {
+      active = undefined;
+    } else if (row.text.trim() !== "") {
+      // Blank separators often arrive with the preceding method. They should
+      // not extend its edit boundary into the next independently added method.
+      const location = line ?? precedingLine + 1;
+      if (active) {
+        active.first = Math.min(active.first, location);
+        active.last = Math.max(active.last, location);
+      } else {
+        active = { first: location, last: location };
+        spans.push(active);
+      }
+    }
+    if (line !== undefined) {
+      precedingLine = line;
+    }
+  }
+  return spans;
+}
+
+/**
+ * Carry display context only when real edits continue near the previous edits.
+ * Authored reference context alone cannot connect unrelated parts of a file.
+ * Coordinates come from the exact comparison, so insertions and deletions before
+ * an excerpt cannot silently attach it to the wrong lines.
+ */
+function continueRegions(
+  rows: DiffLine[],
+  regions: DiffRegion[],
+  previous: FileChange,
+): ChangeRegion[] {
+  const currentEdits = editedSpans(rows, "old");
+  const bounds: ChangeRegion[] = regions.map((region) => ({ ...region }));
+  for (const region of previous.regions) {
+    const previousEdits = editedSpans(region.rows, "next");
+    const related = previousEdits.some((earlier) =>
+      currentEdits.some(
+        (current) => current.first <= earlier.last + 1 && current.last >= earlier.first - 1,
+      ),
+    );
+    if (!related) {
+      continue;
+    }
+
+    const survivingLines = region.rows.flatMap((row) => (row.next === undefined ? [] : [row.next]));
+    if (!survivingLines.length) {
+      continue;
+    }
+    const first = survivingLines[0];
+    const last = survivingLines[survivingLines.length - 1];
+    let start = -1;
+    let end = -1;
+    for (let index = 0; index < rows.length; index++) {
+      const oldLine = rows[index].old;
+      if (oldLine !== undefined && oldLine >= first && oldLine <= last) {
+        if (start < 0) {
+          start = index;
+        }
+        end = index;
+      }
+    }
+    if (start >= 0) {
+      bounds.push({ start, end, rows: [], continued: true });
+    }
+  }
+
+  bounds.sort((left, right) => left.start - right.start);
+  const merged: ChangeRegion[] = [];
+  for (const bound of bounds) {
+    const preceding = merged[merged.length - 1];
+    if (preceding && bound.start <= preceding.end + 1) {
+      preceding.end = Math.max(preceding.end, bound.end);
+      if (bound.continued) {
+        preceding.continued = true;
+      }
+    } else {
+      merged.push({ ...bound });
+    }
+  }
+  return merged.map((region) => ({ ...region, rows: rows.slice(region.start, region.end + 1) }));
 }
 
 function changeKind(previous: SourceState, current: SourceState): FileChange["kind"] {
@@ -35,6 +135,7 @@ async function prepareFileChange(
   at: number,
   readState: SourceStateReader,
   pointers: SourceLink[],
+  preceding?: FileChange,
 ): Promise<FileChange> {
   let previous: SourceState;
   let current: SourceState;
@@ -112,6 +213,17 @@ async function prepareFileChange(
       rows.push({ kind: "same", text: "", next: finalLine, old });
     }
     change.regions = diffRegions(rows, 3, focuses);
+    // A whole newly introduced file is not a bounded teaching excerpt. Start
+    // its next edit compactly rather than inheriting its imports and every method.
+    if (
+      preceding &&
+      preceding.kind !== "added" &&
+      !preceding.failed &&
+      !preceding.coarse &&
+      !comparison.coarse
+    ) {
+      change.regions = continueRegions(rows, change.regions, preceding);
+    }
     if (!change.regions.length) {
       change.notice = "No visible line differences. File bytes or metadata may have changed.";
     }
@@ -130,6 +242,17 @@ export function prepareStepChanges(
   at: number,
   readState: SourceStateReader,
   pointers: SourceLink[] = [],
+  previousChanges: FileChange[] = [],
 ): Promise<FileChange[]> {
-  return Promise.all(paths.map((path) => prepareFileChange(path, at, readState, pointers)));
+  return Promise.all(
+    paths.map((path) =>
+      prepareFileChange(
+        path,
+        at,
+        readState,
+        pointers,
+        previousChanges.find((change) => change.path === path),
+      ),
+    ),
+  );
 }

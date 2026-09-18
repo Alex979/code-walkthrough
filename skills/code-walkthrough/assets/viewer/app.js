@@ -349,6 +349,75 @@ function defaultSelection(step) {
 }
 
 // viewer/src/changes.ts
+function editedSpans(rows, side) {
+  const spans = [];
+  let precedingLine = 0;
+  let active;
+  for (const row of rows) {
+    const line = row[side];
+    if (row.kind === "same") {
+      active = undefined;
+    } else if (row.text.trim() !== "") {
+      const location2 = line ?? precedingLine + 1;
+      if (active) {
+        active.first = Math.min(active.first, location2);
+        active.last = Math.max(active.last, location2);
+      } else {
+        active = { first: location2, last: location2 };
+        spans.push(active);
+      }
+    }
+    if (line !== undefined) {
+      precedingLine = line;
+    }
+  }
+  return spans;
+}
+function continueRegions(rows, regions, previous) {
+  const currentEdits = editedSpans(rows, "old");
+  const bounds = regions.map((region) => ({ ...region }));
+  for (const region of previous.regions) {
+    const previousEdits = editedSpans(region.rows, "next");
+    const related = previousEdits.some((earlier) => currentEdits.some((current) => current.first <= earlier.last + 1 && current.last >= earlier.first - 1));
+    if (!related) {
+      continue;
+    }
+    const survivingLines = region.rows.flatMap((row) => row.next === undefined ? [] : [row.next]);
+    if (!survivingLines.length) {
+      continue;
+    }
+    const first = survivingLines[0];
+    const last = survivingLines[survivingLines.length - 1];
+    let start = -1;
+    let end = -1;
+    for (let index = 0;index < rows.length; index++) {
+      const oldLine = rows[index].old;
+      if (oldLine !== undefined && oldLine >= first && oldLine <= last) {
+        if (start < 0) {
+          start = index;
+        }
+        end = index;
+      }
+    }
+    if (start >= 0) {
+      bounds.push({ start, end, rows: [], continued: true });
+    }
+  }
+  bounds.sort((left, right) => left.start - right.start);
+  const merged = [];
+  for (const bound of bounds) {
+    const preceding = merged[merged.length - 1];
+    if (preceding && bound.start <= preceding.end + 1) {
+      preceding.end = Math.max(preceding.end, bound.end);
+      if (bound.continued) {
+        preceding.continued = true;
+      }
+    } else {
+      merged.push({ ...bound });
+    }
+  }
+  return merged.map((region) => ({ ...region, rows: rows.slice(region.start, region.end + 1) }));
+}
 function changeKind(previous, current) {
   if (!previous.exists && current.exists) {
     return "added";
@@ -358,7 +427,7 @@ function changeKind(previous, current) {
   }
   return "modified";
 }
-async function prepareFileChange(path, at, readState, pointers) {
+async function prepareFileChange(path, at, readState, pointers, preceding) {
   let previous;
   let current;
   try {
@@ -415,6 +484,9 @@ async function prepareFileChange(path, at, readState, pointers) {
       rows.push({ kind: "same", text: "", next: finalLine, old });
     }
     change.regions = diffRegions(rows, 3, focuses);
+    if (preceding && preceding.kind !== "added" && !preceding.failed && !preceding.coarse && !comparison.coarse) {
+      change.regions = continueRegions(rows, change.regions, preceding);
+    }
     if (!change.regions.length) {
       change.notice = "No visible line differences. File bytes or metadata may have changed.";
     }
@@ -425,8 +497,147 @@ async function prepareFileChange(path, at, readState, pointers) {
   }
   return change;
 }
-function prepareStepChanges(paths, at, readState, pointers = []) {
-  return Promise.all(paths.map((path) => prepareFileChange(path, at, readState, pointers)));
+function prepareStepChanges(paths, at, readState, pointers = [], previousChanges = []) {
+  return Promise.all(paths.map((path) => prepareFileChange(path, at, readState, pointers, previousChanges.find((change) => change.path === path))));
+}
+
+// viewer/src/scroll.ts
+function minimalRevealScrollTop(scrollTop, viewportHeight, targetTop, targetBottom, bottomContext = 0) {
+  const current = Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0;
+  if (!Number.isFinite(viewportHeight) || !Number.isFinite(targetTop) || !Number.isFinite(targetBottom) || viewportHeight <= 0 || targetBottom < targetTop) {
+    return current;
+  }
+  if (targetBottom - targetTop > viewportHeight || targetTop < current) {
+    return Math.max(0, targetTop);
+  }
+  const requestedContext = Number.isFinite(bottomContext) ? Math.max(0, bottomContext) : 0;
+  const availableContext = viewportHeight - (targetBottom - targetTop);
+  const revealBottom = targetBottom + Math.min(requestedContext, availableContext);
+  if (revealBottom > current + viewportHeight) {
+    return Math.max(0, revealBottom - viewportHeight);
+  }
+  return current;
+}
+function reserveScrollSpace(body, desiredScrollTop) {
+  const maxScrollTop = Math.max(0, body.scrollHeight - body.clientHeight);
+  if (!Number.isFinite(desiredScrollTop) || desiredScrollTop <= maxScrollTop) {
+    return { maxScrollTop, release: () => {}, dispose: () => {} };
+  }
+  const spacer = body.ownerDocument.createElement("div");
+  spacer.setAttribute("aria-hidden", "true");
+  spacer.style.flexShrink = "0";
+  spacer.style.overflowAnchor = "none";
+  const reservedTop = Math.ceil(desiredScrollTop);
+  let height = reservedTop + body.clientHeight;
+  spacer.style.height = `${height}px`;
+  body.append(spacer);
+  height -= body.scrollHeight - body.clientHeight - reservedTop;
+  spacer.style.height = `${Math.max(0, height)}px`;
+  let disposed = false;
+  let releasing = false;
+  const dispose = () => {
+    if (disposed) {
+      return;
+    }
+    disposed = true;
+    body.removeEventListener("scroll", shrink);
+    spacer.remove();
+  };
+  const shrink = () => {
+    if (disposed) {
+      return;
+    }
+    if (body.scrollTop <= maxScrollTop) {
+      dispose();
+      return;
+    }
+    const surplus = body.scrollHeight - body.clientHeight - body.scrollTop;
+    height = Math.max(0, height - Math.max(0, Math.floor(surplus)));
+    spacer.style.height = `${height}px`;
+  };
+  const release = () => {
+    if (disposed || releasing) {
+      return;
+    }
+    releasing = true;
+    body.addEventListener("scroll", shrink, { passive: true });
+    shrink();
+  };
+  return { maxScrollTop, release, dispose };
+}
+function animateScroll(body, target, onFinish, onCancel) {
+  const view = body.ownerDocument.defaultView;
+  const clamp = (value) => {
+    const maximum = Math.max(0, body.scrollHeight - body.clientHeight);
+    return Math.min(maximum, Math.max(0, value));
+  };
+  const destination = Number.isFinite(target) ? clamp(target) : body.scrollTop;
+  const reducedMotion = view?.matchMedia("(prefers-reduced-motion: reduce)");
+  if (!view || reducedMotion?.matches || destination === body.scrollTop) {
+    body.scrollTop = destination;
+    onFinish?.();
+    return () => {};
+  }
+  const start = body.scrollTop;
+  const duration = 600;
+  let startedAt;
+  let frame = 0;
+  let stopped = false;
+  const stop = () => {
+    if (stopped) {
+      return false;
+    }
+    stopped = true;
+    view.cancelAnimationFrame(frame);
+    body.removeEventListener("wheel", cancel);
+    body.removeEventListener("touchstart", cancel);
+    body.removeEventListener("pointerdown", cancel);
+    body.removeEventListener("keydown", onKeyDown);
+    reducedMotion?.removeEventListener("change", onMotionChange);
+    return true;
+  };
+  const cancel = () => {
+    if (stop()) {
+      onCancel?.();
+    }
+  };
+  const finish = () => {
+    if (stop()) {
+      onFinish?.();
+    }
+  };
+  const onKeyDown = (event) => {
+    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+      cancel();
+    }
+  };
+  const onMotionChange = () => {
+    if (reducedMotion?.matches) {
+      body.scrollTop = clamp(destination);
+      finish();
+    }
+  };
+  const tick = (time) => {
+    if (stopped) {
+      return;
+    }
+    startedAt ??= time;
+    const progress = Math.min(1, Math.max(0, (time - startedAt) / duration));
+    const eased = (1 - Math.cos(Math.PI * progress)) / 2;
+    body.scrollTop = clamp(start + (destination - start) * eased);
+    if (progress === 1) {
+      finish();
+      return;
+    }
+    frame = view.requestAnimationFrame(tick);
+  };
+  body.addEventListener("wheel", cancel, { passive: true });
+  body.addEventListener("touchstart", cancel, { passive: true });
+  body.addEventListener("pointerdown", cancel, { passive: true });
+  body.addEventListener("keydown", onKeyDown);
+  reducedMotion?.addEventListener("change", onMotionChange);
+  frame = view.requestAnimationFrame(tick);
+  return cancel;
 }
 
 // viewer/src/prose.ts
@@ -752,6 +963,7 @@ var resumeKey = "";
 var resumeStorage;
 var resumeReady = false;
 var saveTimer;
+var cancelCodeScroll;
 function currentPosition() {
   const body = root.querySelector("#code-body");
   return {
@@ -1425,11 +1637,22 @@ function loadStepChanges(at) {
   if (cached) {
     return cached;
   }
-  const pending = prepareStepChanges(Object.keys(steps2[at].changes ?? {}), at, async (filePath, index) => ({
-    exists: fileExists(files.get(filePath), index, "step"),
-    text: await read(filePath, "step", index)
-  }), steps2[at].paragraphs.flat().filter((part) => typeof part !== "string" && part.view === "changes")).then((changes) => {
-    if (changes.some((change) => change.failed)) {
+  let retryable = false;
+  const pending = (async () => {
+    const paths = Object.keys(steps2[at].changes ?? {});
+    let previous = [];
+    if (at > 0 && paths.some((filePath) => Object.hasOwn(steps2[at - 1].changes ?? {}, filePath))) {
+      const predecessor = await loadStepChanges(at - 1);
+      previous = predecessor.files;
+      retryable = predecessor.retryable;
+    }
+    return prepareStepChanges(paths, at, async (filePath, index) => ({
+      exists: fileExists(files.get(filePath), index, "step"),
+      text: await read(filePath, "step", index)
+    }), steps2[at].paragraphs.flat().filter((part) => typeof part !== "string" && part.view === "changes"), previous);
+  })().then((changes) => {
+    retryable ||= changes.some((change) => change.failed);
+    if (retryable) {
       stepChangesCache.delete(at);
     }
     const entries = changes.map((change, fileIndex) => {
@@ -1445,7 +1668,7 @@ function loadStepChanges(at) {
           const id = `change-${fileIndex}-${regionIndex}`;
           const label = regionLabel(region.rows);
           regions.push({ id, path: filePath, label });
-          return `<section class="change-region" id="${id}" tabindex="-1" aria-label="${escape(filePath + ": " + label)}">
+          return `<section class="change-region" id="${id}" ${region.continued ? 'data-continued="true"' : ""} tabindex="-1" aria-label="${escape(filePath + ": " + label)}">
             <div class="region-heading">${escape(label)}</div>
             ${region.rows.map((row) => renderCodeRow(row, true, filePath, null)).join("")}
           </section>`;
@@ -1467,6 +1690,8 @@ function loadStepChanges(at) {
       };
     });
     return {
+      files: changes,
+      retryable,
       html: entries.map((entry) => entry.html).join(""),
       regions: entries.flatMap((entry) => entry.regions)
     };
@@ -1484,7 +1709,7 @@ function renderChangeNavigation() {
   nav.innerHTML = `<span class="change-summary">This step: ${fileCount} ${fileCount === 1 ? "file" : "files"} · ${changeRegions.length} ${changeRegions.length === 1 ? "region" : "regions"}</span>
     <div class="change-targets">${changeRegions.map((region, index) => `<button type="button" data-region="${index}" title="${escape(region.path + ": " + region.label)}">${escape(region.path.split("/").at(-1))} · ${escape(region.label)}</button>`).join("")}</div>`;
 }
-function revealFocus(body) {
+function revealFocus(body, animate = false) {
   if (!focus) {
     return;
   }
@@ -1502,7 +1727,12 @@ function revealFocus(body) {
   const bodyTop = body.getBoundingClientRect().top + body.clientTop;
   const top = first.getBoundingClientRect().top - bodyTop + body.scrollTop;
   const bottom = last.getBoundingClientRect().bottom - bodyTop + body.scrollTop;
-  body.scrollTop = Math.max(0, focusScrollTop(body.scrollTop + inset, body.clientHeight - inset, top, bottom) - inset);
+  const destination = Math.max(0, focusScrollTop(body.scrollTop + inset, body.clientHeight - inset, top, bottom) - inset);
+  if (animate) {
+    cancelCodeScroll = animateScroll(body, destination, scheduleResumeSave);
+  } else {
+    body.scrollTop = destination;
+  }
 }
 function changeArticle(filePath) {
   return Array.from(root.querySelectorAll("[data-change-path]")).find((article) => article.dataset.changePath === filePath);
@@ -1517,10 +1747,104 @@ function markOverviewFocus() {
     line.classList.toggle("line-focus", number >= focus[0] && number <= focus[1]);
   });
 }
+function captureContinuation(backward) {
+  const body = root.querySelector("#code-body");
+  const bounds = body.getBoundingClientRect();
+  const candidates = [];
+  for (const article of body.querySelectorAll("[data-change-path]")) {
+    const inset = article.querySelector(".change-file-heading").offsetHeight;
+    const selector = backward ? "[data-continued] .code-line.same[data-old-line]" : ".code-line[data-line]";
+    const visibleTop = bounds.top + inset;
+    for (const row of article.querySelectorAll(selector)) {
+      const rect = row.getBoundingClientRect();
+      const visible = rect.top >= visibleTop && rect.top < bounds.bottom;
+      if (backward || visible) {
+        let priority = 0;
+        if (!visible) {
+          priority = rect.top < visibleTop ? 1 : 2;
+        }
+        candidates.push({
+          anchor: {
+            path: article.dataset.changePath,
+            line: Number(backward ? row.dataset.oldLine : row.dataset.line),
+            screenTop: rect.top
+          },
+          priority,
+          distance: Math.abs(rect.top - visibleTop)
+        });
+      }
+    }
+  }
+  if (backward) {
+    candidates.sort((left, right) => left.priority - right.priority || left.distance - right.distance);
+  }
+  const anchors = candidates.map((candidate) => candidate.anchor);
+  return { anchors, scrollLeft: body.scrollLeft, backward };
+}
+function revealContinuation(body, previous) {
+  const backward = previous?.backward === true;
+  let target = backward ? null : body.querySelector('[data-continued="true"]');
+  if (!backward && !target) {
+    return;
+  }
+  let space;
+  for (const anchor of previous?.anchors ?? []) {
+    const article2 = changeArticle(anchor.path);
+    const row = article2?.querySelector(backward ? `.change-region .code-line[data-line="${anchor.line}"]` : `[data-continued] .code-line.same[data-old-line="${anchor.line}"]`);
+    if (row) {
+      const anchoredTop = Math.max(0, body.scrollTop + row.getBoundingClientRect().top - anchor.screenTop);
+      if (backward) {
+        space = reserveScrollSpace(body, anchoredTop);
+      }
+      body.scrollTop = anchoredTop;
+      target = row.closest(".change-region");
+      break;
+    }
+  }
+  if (!target) {
+    return;
+  }
+  if (previous) {
+    body.scrollLeft = previous.scrollLeft;
+  }
+  const edits = target.querySelectorAll(".code-line.add, .code-line.remove");
+  const first = edits[0];
+  const last = edits[edits.length - 1];
+  if (!first || !last) {
+    space?.dispose();
+    return;
+  }
+  const article = target.closest(".change-file");
+  const inset = article.querySelector(".change-file-heading").offsetHeight;
+  const bodyTop = body.getBoundingClientRect().top + body.clientTop;
+  const top = first.getBoundingClientRect().top - bodyTop + body.scrollTop;
+  const bottom = last.getBoundingClientRect().bottom - bodyTop + body.scrollTop;
+  const bottomContext = 2 * Number.parseFloat(getComputedStyle(last).lineHeight);
+  let destination = Math.max(0, minimalRevealScrollTop(body.scrollTop + inset, body.clientHeight - inset, top, bottom, bottomContext) - inset);
+  if (space) {
+    destination = Math.min(destination, space.maxScrollTop);
+  }
+  if (previous) {
+    const finish = () => {
+      space?.release();
+      scheduleResumeSave();
+    };
+    const cancel = animateScroll(body, destination, finish, () => space?.release());
+    cancelCodeScroll = () => {
+      cancel();
+      space?.dispose();
+    };
+  } else {
+    body.scrollTop = destination;
+  }
+}
 async function renderCode(position = {}) {
+  cancelCodeScroll?.();
+  cancelCodeScroll = undefined;
   const ticket = ++requestId;
   const body = root.querySelector("#code-body");
   const sourceKey = sourceIdentity();
+  const animateFocus = renderedSource === sourceKey;
   const savedScroll = position.scrollTop ?? (renderedSource === sourceKey ? body.scrollTop : 0);
   const savedHorizontal = position.scrollLeft ?? (renderedSource === sourceKey ? body.scrollLeft : 0);
   const overview = mode === "changes";
@@ -1548,7 +1872,7 @@ async function renderCode(position = {}) {
     github.href = manifest.sourceUrl;
   }
   github.textContent = "Change source ↗";
-  if (renderedSource !== sourceKey) {
+  if (renderedSource !== sourceKey && !position.continuation) {
     body.innerHTML = '<p class="loading">Loading source…</p>';
   }
   try {
@@ -1586,7 +1910,11 @@ async function renderCode(position = {}) {
       }
       root.querySelector("#code-status").textContent = "All changes in this step · Compared with the preceding state" + (focus && path ? ` · Selected ${path}:${focus[0]}–${focus[1]}` : "");
       if (position.reveal !== false) {
-        revealFocus(body);
+        if (focus) {
+          revealFocus(body, animateFocus);
+        } else {
+          revealContinuation(body, position.continuation);
+        }
       }
       return;
     }
@@ -1649,7 +1977,7 @@ async function renderCode(position = {}) {
         return;
       }
       if (position.reveal !== false) {
-        revealFocus(body);
+        revealFocus(body, animateFocus);
       }
     });
   } catch (error) {
@@ -1788,14 +2116,19 @@ async function openFullFile(button) {
   });
 }
 async function goStep(index, record = true) {
+  cancelCodeScroll?.();
+  cancelCodeScroll = undefined;
+  const continuation = Math.abs(index - step) === 1 && mode === "changes" && renderedSource === sourceIdentity() ? captureContinuation(index < step) : undefined;
   rememberPosition();
   root.querySelector("#resume-notice").hidden = true;
   step = Math.max(0, Math.min(steps2.length - 1, index));
   renderedSource = "";
   const choice = defaultSelection(steps2[step]);
   version = choice.version;
-  changeRegions = [];
-  renderChangeNavigation();
+  if (!continuation) {
+    changeRegions = [];
+    renderChangeNavigation();
+  }
   renderGuide();
   if (choice.mode === "changes" || !choice.path) {
     path = "";
@@ -1807,7 +2140,7 @@ async function goStep(index, record = true) {
     if (record) {
       updateLocation();
     }
-    await renderCode();
+    await renderCode({ continuation });
   } else {
     await openFile(choice.path, {
       label: "",
@@ -1844,6 +2177,7 @@ async function openRegion(index) {
     return;
   }
   const at = step;
+  const animate = mode === "changes" && renderedSource === sourceIdentity();
   if (mode !== "changes") {
     const pending = openOverview();
     const ticket = requestId;
@@ -1864,7 +2198,12 @@ async function openRegion(index) {
   if (target) {
     const inset = target.closest(".change-file")?.querySelector(".change-file-heading")?.offsetHeight ?? 0;
     const top = target.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
-    body.scrollTop = Math.max(0, focusScrollTop(body.scrollTop + inset, body.clientHeight - inset, top, top + target.offsetHeight) - inset);
+    const destination = Math.max(0, focusScrollTop(body.scrollTop + inset, body.clientHeight - inset, top, top + target.offsetHeight) - inset);
+    if (animate) {
+      cancelCodeScroll = animateScroll(body, destination, scheduleResumeSave);
+    } else {
+      body.scrollTop = destination;
+    }
     target.focus({ preventScroll: true });
   }
 }
@@ -1873,6 +2212,8 @@ function handleClick(event) {
   if (!element || element.disabled) {
     return;
   }
+  cancelCodeScroll?.();
+  cancelCodeScroll = undefined;
   if (element.dataset.step !== undefined) {
     goStep(Number(element.dataset.step));
     return;

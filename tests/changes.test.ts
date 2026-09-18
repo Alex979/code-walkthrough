@@ -380,3 +380,185 @@ test("an empty text file has a single display line when an overview pointer sele
   expect(change.notice).toBeUndefined();
   expect(change.regions[0].rows).toEqual([{ kind: "same", text: "", next: 1, old: undefined }]);
 });
+
+test("consecutive construction steps retain the declaration and earlier excerpt in current coordinates", async () => {
+  const prefix = Array.from({ length: 20 }, (_, index) => `existing ${index}`);
+  const setup = Array.from({ length: 12 }, (_, index) => `  setup${index}();`);
+  const search = Array.from({ length: 10 }, (_, index) => `  search${index}();`);
+  const positions = Array.from({ length: 9 }, (_, index) => `  position${index}();`);
+  const states = [
+    prefix,
+    [...prefix, "function layout() {", ...setup, "}"],
+    [...prefix, "function layout() {", ...setup, ...search, "}"],
+    [...prefix, "function layout() {", ...setup, ...search, ...positions, "}"],
+  ];
+  const reader: SourceStateReader = async (_path, at) => ({
+    exists: true,
+    text: states[at].join("\n"),
+  });
+  const first = await prepareStepChanges(["layout.ts"], 1, reader);
+  const second = await prepareStepChanges(["layout.ts"], 2, reader, [], first);
+  const third = await prepareStepChanges(["layout.ts"], 3, reader, [], second);
+
+  for (const changes of [second, third]) {
+    expect(changes[0].regions).toHaveLength(1);
+    expect(changes[0].regions[0].continued).toBe(true);
+    expect(changes[0].regions[0].rows[0].text).toBe(first[0].regions[0].rows[0].text);
+    expect(changes[0].regions[0].rows.find((row) => row.text === "function layout() {")).toEqual({
+      kind: "same",
+      text: "function layout() {",
+      old: 21,
+      next: 21,
+    });
+    expect(changes[0].regions[0].rows.find((row) => row.text === setup[0])?.kind).toBe("same");
+  }
+  expect(
+    third[0].regions[0].rows.filter((row) => row.kind === "add").map((row) => row.text),
+  ).toEqual(positions);
+  expect(third[0].regions[0].rows.find((row) => row.text === search[0])?.kind).toBe("same");
+});
+
+test("continuing replacements and deletions map old display lines without losing other changes", async () => {
+  const initial = Array.from({ length: 100 }, (_, index) => `line ${index + 1}`);
+  const firstState = [
+    ...initial.slice(0, 25),
+    ...Array.from({ length: 12 }, (_, index) => `introduced ${index}`),
+    ...initial.slice(25),
+  ];
+  const secondState = [...firstState];
+  secondState.splice(27, 4, "replacement");
+  secondState[95] = "distant change";
+  secondState.unshift("new preamble");
+  const states = [initial, firstState, secondState];
+  const reader: SourceStateReader = async (_path, at) => ({
+    exists: true,
+    text: states[at].join("\n"),
+  });
+  const first = await prepareStepChanges(["layout.ts"], 1, reader);
+  const [second] = await prepareStepChanges(["layout.ts"], 2, reader, [], first);
+  expect(second.regions).toHaveLength(3);
+  expect(second.regions[1].continued).toBe(true);
+  expect(second.regions[0].continued).toBeUndefined();
+  expect(second.regions[2].continued).toBeUndefined();
+  const rows = second.regions.flatMap((region) => region.rows);
+  expect(rows.filter((row) => row.kind === "remove").map((row) => row.text)).toEqual([
+    "introduced 2",
+    "introduced 3",
+    "introduced 4",
+    "introduced 5",
+    "line 87",
+  ]);
+  expect(rows.filter((row) => row.kind === "add").map((row) => row.text)).toEqual([
+    "new preamble",
+    "replacement",
+    "distant change",
+  ]);
+  expect(rows.find((row) => row.text === "introduced 11")).toEqual({
+    kind: "same",
+    text: "introduced 11",
+    old: 37,
+    next: 35,
+  });
+});
+
+test("unrelated methods, other files, and pointer-only context never manufacture a continuation", async () => {
+  const initial = Array.from({ length: 100 }, (_, index) => `line ${index + 1}`);
+  const firstState = [...initial];
+  firstState[12] = "first method edit";
+  const secondState = [...firstState];
+  secondState[80] = "other method edit";
+  const states = [initial, firstState, secondState];
+  const reader: SourceStateReader = async (_path, at) => ({
+    exists: true,
+    text: states[at].join("\n"),
+  });
+  const first = await prepareStepChanges(["source.ts"], 1, reader, [
+    { path: "source.ts", label: "other method reference", view: "changes", start: 80, end: 84 },
+  ]);
+  expect(first[0].regions).toHaveLength(2);
+  const [second] = await prepareStepChanges(["source.ts"], 2, reader, [], first);
+  expect(second.regions).toHaveLength(1);
+  expect(second.regions[0].continued).toBeUndefined();
+  expect(second.regions[0].rows.some((row) => row.text === "first method edit")).toBe(false);
+
+  const otherFile = await prepareStepChanges(["other.ts"], 2, reader, [], first);
+  expect(otherFile[0].regions[0].continued).toBeUndefined();
+  const contextOnly = await prepareStepChanges(
+    ["source.ts"],
+    2,
+    async () => ({ exists: true, text: firstState.join("\n") }),
+    [{ path: "source.ts", label: "same method", view: "changes", start: 13 }],
+    first,
+  );
+  expect(contextOnly[0].regions[0].continued).toBeUndefined();
+});
+
+test("coarse or unreadable predecessors cannot claim excerpt continuity", async () => {
+  const initial = Array.from({ length: 2000 }, (_, index) => `original ${index}`).join("\n");
+  const replacement = Array.from({ length: 2000 }, (_, index) => `replacement ${index}`).join("\n");
+  const states = [initial, replacement, replacement + "\nappended"];
+  const reader: SourceStateReader = async (_path, at) => ({ exists: true, text: states[at] });
+  const coarse = await prepareStepChanges(["source.ts"], 1, reader);
+  expect(coarse[0].coarse).toBe(true);
+  const [following] = await prepareStepChanges(["source.ts"], 2, reader, [], coarse);
+  expect(following.regions[0].continued).toBeUndefined();
+  expect(following.regions[0].rows).toHaveLength(4);
+  const [nextCoarse] = await prepareStepChanges(["source.ts"], 1, reader, [], [following]);
+  expect(nextCoarse.coarse).toBe(true);
+  expect(nextCoarse.regions.every((region) => !region.continued)).toBe(true);
+  const unreadable = await prepareStepChanges(
+    ["source.ts"],
+    2,
+    async () => ({ exists: true }),
+    [],
+    coarse,
+  );
+  expect(unreadable[0].regions).toEqual([]);
+});
+
+test("a new method after a freshly introduced file starts with compact context", async () => {
+  const firstSource = [
+    "import { helper } from 'helper';",
+    ...Array.from({ length: 35 }, (_, index) => `existing ${index}`),
+    "function first() {",
+    "  helper();",
+    "}",
+  ];
+  const secondSource = [...firstSource, "", "function second() {", "  prepare();", "}"];
+  const reader: SourceStateReader = async (_path, at) => {
+    if (at === 0) {
+      return { exists: false };
+    }
+    return { exists: true, text: (at === 1 ? firstSource : secondSource).join("\n") };
+  };
+  const first = await prepareStepChanges(["source.ts"], 1, reader);
+  expect(first[0].kind).toBe("added");
+  const [second] = await prepareStepChanges(["source.ts"], 2, reader, [], first);
+  expect(second.regions).toHaveLength(1);
+  expect(second.regions[0].continued).toBeUndefined();
+  expect(second.regions[0].rows.some((row) => row.text.includes("import"))).toBe(false);
+  expect(second.regions[0].rows.filter((row) => row.kind === "same")).toHaveLength(3);
+});
+
+test("a separate method after a blank line does not inherit the previous method excerpt", async () => {
+  const baseline = ["class Layout {", "}"];
+  const firstSource = [
+    baseline[0],
+    "function first() {",
+    ...Array.from({ length: 20 }, (_, index) => `  prepare${index}();`),
+    "}",
+    "",
+    "}",
+  ];
+  const secondSource = [...firstSource.slice(0, -1), "function second() {", "  next();", "}", "}"];
+  const states = [baseline, firstSource, secondSource];
+  const reader: SourceStateReader = async (_path, at) => ({
+    exists: true,
+    text: states[at].join("\n"),
+  });
+  const first = await prepareStepChanges(["source.ts"], 1, reader);
+  const [second] = await prepareStepChanges(["source.ts"], 2, reader, [], first);
+  expect(second.regions).toHaveLength(1);
+  expect(second.regions[0].continued).toBeUndefined();
+  expect(second.regions[0].rows.some((row) => row.text === "function first() {")).toBe(false);
+});

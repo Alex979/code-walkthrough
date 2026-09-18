@@ -56,6 +56,8 @@ Choose the default presentation for the step's purpose:
 - A step without changes and with `file` opens that full file. Give it a useful `focus` or `symbol`/`count` when explaining a particular location in existing code.
 - A step without changes or `file` leaves the source area empty, even if the preceding step opened a file. Use this for an opening or other explanation with no clear source target. Optional paragraph links can still open source.
 
+When consecutive steps edit the same nearby source, the overview retains the preceding excerpt as context and highlights only the current edits. This context is derived from lesson order, including for direct step links; it does not require an authored continuation field. Moving forward or backward through that excerpt preserves a surviving source-line anchor, then smoothly scrolls to reveal the destination step's edits, with a little context below when space permits. Edits taller than the viewport reveal their beginning. Back temporarily reserves space while the code shrinks so the browser cannot abruptly clamp the scroll position. Reduced-motion preferences skip the animation. Distant edits and changes in other files keep their own compact regions. Continue to supply precise pointers where the explanation needs them; automatic context is not a language-aware method boundary detector.
+
 Omit `focus`, `symbol`, `count`, and `version` when there is no `file`. A specified file must exist in its selected version. If a step has both changes and a file target, the change overview still opens first; the target provides a full-file location for further inspection. A deletion can be explained with a `base` reference even after the current step has removed the file.
 
 Versions mean:

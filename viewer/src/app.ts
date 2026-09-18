@@ -12,7 +12,8 @@ import {
   type DiffLine,
   type DisplayMode,
 } from "./model";
-import { prepareStepChanges } from "./changes";
+import { prepareStepChanges, type FileChange } from "./changes";
+import { animateScroll, minimalRevealScrollTop, reserveScrollSpace } from "./scroll";
 import { compareLines, type LineComparison } from "../../skills/code-walkthrough/scripts/diff";
 import { renderInline } from "./prose";
 import { fullFileFocus, isFocusRendered, ReadingMemory, type ReadingPosition } from "./navigation";
@@ -62,6 +63,7 @@ let resumeKey = "";
 let resumeStorage: Storage | undefined;
 let resumeReady = false;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
+let cancelCodeScroll: (() => void) | undefined;
 
 function currentPosition(): ReadingPosition {
   const body = root.querySelector<HTMLElement>("#code-body")!;
@@ -115,6 +117,13 @@ interface RenderPosition {
   scrollTop?: number;
   scrollLeft?: number;
   reveal?: boolean;
+  continuation?: ContinuationPosition;
+}
+
+interface ContinuationPosition {
+  anchors: { path: string; line: number; screenTop: number }[];
+  scrollLeft: number;
+  backward: boolean;
 }
 
 function sourceIdentity(): string {
@@ -152,7 +161,14 @@ interface ChangeRegion {
 }
 
 let changeRegions: ChangeRegion[] = [];
-const stepChangesCache = new Map<number, Promise<{ html: string; regions: ChangeRegion[] }>>();
+interface PreparedOverview {
+  html: string;
+  regions: ChangeRegion[];
+  files: FileChange[];
+  retryable: boolean;
+}
+
+const stepChangesCache = new Map<number, Promise<PreparedOverview>>();
 
 function escape(value: string): string {
   return value
@@ -908,25 +924,42 @@ function regionLabel(rows: DiffLine[]): string {
   return `${added.length ? "Lines" : removed.length ? "Removed lines" : "Context lines"} ${range}`;
 }
 
-function loadStepChanges(at: number): Promise<{ html: string; regions: ChangeRegion[] }> {
+function loadStepChanges(at: number): Promise<PreparedOverview> {
   const cached = stepChangesCache.get(at);
   if (cached) {
     return cached;
   }
 
-  const pending = prepareStepChanges(
-    Object.keys(steps[at].changes ?? {}),
-    at,
-    async (filePath, index) => ({
-      exists: fileExists(files.get(filePath)!, index, "step"),
-      text: await read(filePath, "step", index),
-    }),
-    steps[at].paragraphs
-      .flat()
-      .filter((part): part is SourceLink => typeof part !== "string" && part.view === "changes"),
-  )
+  let retryable = false;
+  const pending = (async () => {
+    const paths = Object.keys(steps[at].changes ?? {});
+    let previous: FileChange[] = [];
+    // Derive context from lesson order, not browsing history. A direct link and
+    // sequential Next therefore render the same growing excerpt. Stop at a step
+    // that does not touch any of these files, avoiding an unrelated history walk.
+    if (at > 0 && paths.some((filePath) => Object.hasOwn(steps[at - 1].changes ?? {}, filePath))) {
+      const predecessor = await loadStepChanges(at - 1);
+      previous = predecessor.files;
+      retryable = predecessor.retryable;
+    }
+    return prepareStepChanges(
+      paths,
+      at,
+      async (filePath, index) => ({
+        exists: fileExists(files.get(filePath)!, index, "step"),
+        text: await read(filePath, "step", index),
+      }),
+      steps[at].paragraphs
+        .flat()
+        .filter((part): part is SourceLink => typeof part !== "string" && part.view === "changes"),
+      previous,
+    );
+  })()
     .then((changes) => {
-      if (changes.some((change) => change.failed)) {
+      // A healthy current comparison may still lack context because an earlier
+      // read failed. Do not permanently cache that incomplete excerpt either.
+      retryable ||= changes.some((change) => change.failed);
+      if (retryable) {
         stepChangesCache.delete(at);
       }
       const entries = changes.map((change, fileIndex) => {
@@ -946,7 +979,7 @@ function loadStepChanges(at: number): Promise<{ html: string; regions: ChangeReg
               const id = `change-${fileIndex}-${regionIndex}`;
               const label = regionLabel(region.rows);
               regions.push({ id, path: filePath, label });
-              return `<section class="change-region" id="${id}" tabindex="-1" aria-label="${escape(filePath + ": " + label)}">
+              return `<section class="change-region" id="${id}" ${region.continued ? 'data-continued="true"' : ""} tabindex="-1" aria-label="${escape(filePath + ": " + label)}">
             <div class="region-heading">${escape(label)}</div>
             ${region.rows.map((row) => renderCodeRow(row, true, filePath, null)).join("")}
           </section>`;
@@ -970,6 +1003,8 @@ function loadStepChanges(at: number): Promise<{ html: string; regions: ChangeReg
         };
       });
       return {
+        files: changes,
+        retryable,
         html: entries.map((entry) => entry.html).join(""),
         regions: entries.flatMap((entry) => entry.regions),
       };
@@ -990,7 +1025,7 @@ function renderChangeNavigation(): void {
     <div class="change-targets">${changeRegions.map((region, index) => `<button type="button" data-region="${index}" title="${escape(region.path + ": " + region.label)}">${escape(region.path.split("/").at(-1)!)} · ${escape(region.label)}</button>`).join("")}</div>`;
 }
 
-function revealFocus(body: HTMLElement): void {
+function revealFocus(body: HTMLElement, animate = false): void {
   if (!focus) {
     return;
   }
@@ -1014,10 +1049,15 @@ function revealFocus(body: HTMLElement): void {
   const bodyTop = body.getBoundingClientRect().top + body.clientTop;
   const top = first.getBoundingClientRect().top - bodyTop + body.scrollTop;
   const bottom = last.getBoundingClientRect().bottom - bodyTop + body.scrollTop;
-  body.scrollTop = Math.max(
+  const destination = Math.max(
     0,
     focusScrollTop(body.scrollTop + inset, body.clientHeight - inset, top, bottom) - inset,
   );
+  if (animate) {
+    cancelCodeScroll = animateScroll(body, destination, scheduleResumeSave);
+  } else {
+    body.scrollTop = destination;
+  }
 }
 
 function changeArticle(filePath: string): HTMLElement | undefined {
@@ -1041,10 +1081,142 @@ function markOverviewFocus(): void {
     });
 }
 
+function captureContinuation(backward: boolean): ContinuationPosition {
+  const body = root.querySelector<HTMLElement>("#code-body")!;
+  const bounds = body.getBoundingClientRect();
+  const candidates: {
+    anchor: ContinuationPosition["anchors"][number];
+    priority: number;
+    distance: number;
+  }[] = [];
+  for (const article of body.querySelectorAll<HTMLElement>("[data-change-path]")) {
+    const inset = article.querySelector<HTMLElement>(".change-file-heading")!.offsetHeight;
+    // On Back, the outgoing comparison maps surviving lines directly into the
+    // preceding step. Retain offscreen anchors too: all visible additions may
+    // disappear, while the unchanged setup immediately above them still exists.
+    const selector = backward
+      ? "[data-continued] .code-line.same[data-old-line]"
+      : ".code-line[data-line]";
+    const visibleTop = bounds.top + inset;
+    for (const row of article.querySelectorAll<HTMLElement>(selector)) {
+      const rect = row.getBoundingClientRect();
+      const visible = rect.top >= visibleTop && rect.top < bounds.bottom;
+      if (backward || visible) {
+        let priority = 0;
+        if (!visible) {
+          priority = rect.top < visibleTop ? 1 : 2;
+        }
+        candidates.push({
+          anchor: {
+            path: article.dataset.changePath!,
+            line: Number(backward ? row.dataset.oldLine : row.dataset.line),
+            screenTop: rect.top,
+          },
+          priority,
+          distance: Math.abs(rect.top - visibleTop),
+        });
+      }
+    }
+  }
+  if (backward) {
+    candidates.sort(
+      (left, right) => left.priority - right.priority || left.distance - right.distance,
+    );
+  }
+  const anchors = candidates.map((candidate) => candidate.anchor);
+  return { anchors, scrollLeft: body.scrollLeft, backward };
+}
+
+function revealContinuation(body: HTMLElement, previous?: ContinuationPosition): void {
+  const backward = previous?.backward === true;
+  let target = backward ? null : body.querySelector<HTMLElement>('[data-continued="true"]');
+  if (!backward && !target) {
+    return;
+  }
+  let space: ReturnType<typeof reserveScrollSpace> | undefined;
+
+  // Match unchanged source lines through the new diff's old coordinates. Pixel
+  // offsets alone cannot preserve orientation when preceding content changes.
+  for (const anchor of previous?.anchors ?? []) {
+    const article = changeArticle(anchor.path);
+    const row = article?.querySelector<HTMLElement>(
+      backward
+        ? `.change-region .code-line[data-line="${anchor.line}"]`
+        : `[data-continued] .code-line.same[data-old-line="${anchor.line}"]`,
+    );
+    if (row) {
+      const anchoredTop = Math.max(
+        0,
+        body.scrollTop + row.getBoundingClientRect().top - anchor.screenTop,
+      );
+      if (backward) {
+        space = reserveScrollSpace(body, anchoredTop);
+      }
+      body.scrollTop = anchoredTop;
+      target = row.closest<HTMLElement>(".change-region")!;
+      break;
+    }
+  }
+  if (!target) {
+    return;
+  }
+  if (previous) {
+    body.scrollLeft = previous.scrollLeft;
+  }
+
+  const edits = target.querySelectorAll<HTMLElement>(".code-line.add, .code-line.remove");
+  const first = edits[0];
+  const last = edits[edits.length - 1];
+  if (!first || !last) {
+    space?.dispose();
+    return;
+  }
+  const article = target.closest<HTMLElement>(".change-file")!;
+  const inset = article.querySelector<HTMLElement>(".change-file-heading")!.offsetHeight;
+  const bodyTop = body.getBoundingClientRect().top + body.clientTop;
+  const top = first.getBoundingClientRect().top - bodyTop + body.scrollTop;
+  const bottom = last.getBoundingClientRect().bottom - bodyTop + body.scrollTop;
+  const bottomContext = 2 * Number.parseFloat(getComputedStyle(last).lineHeight);
+  let destination = Math.max(
+    0,
+    minimalRevealScrollTop(
+      body.scrollTop + inset,
+      body.clientHeight - inset,
+      top,
+      bottom,
+      bottomContext,
+    ) - inset,
+  );
+  if (space) {
+    // Settle inside the restored content before removing its temporary space.
+    destination = Math.min(destination, space.maxScrollTop);
+  }
+  if (previous) {
+    const finish = (): void => {
+      space?.release();
+      scheduleResumeSave();
+    };
+    const cancel = animateScroll(body, destination, finish, () => space?.release());
+    cancelCodeScroll = () => {
+      cancel();
+      space?.dispose();
+    };
+  } else {
+    // Direct navigation has no prior screen position to animate from.
+    body.scrollTop = destination;
+  }
+}
+
 async function renderCode(position: RenderPosition = {}): Promise<void> {
+  cancelCodeScroll?.();
+  cancelCodeScroll = undefined;
   const ticket = ++requestId;
   const body = root.querySelector<HTMLElement>("#code-body")!;
   const sourceKey = sourceIdentity();
+  // A new selection in the same rendered source keeps its scroll position.
+  // Animate the reveal only on that continuous surface, not across different
+  // files, source versions, or compact/full-file layouts.
+  const animateFocus = renderedSource === sourceKey;
   const savedScroll = position.scrollTop ?? (renderedSource === sourceKey ? body.scrollTop : 0);
   const savedHorizontal =
     position.scrollLeft ?? (renderedSource === sourceKey ? body.scrollLeft : 0);
@@ -1083,7 +1255,7 @@ async function renderCode(position: RenderPosition = {}): Promise<void> {
   }
   github.textContent = "Change source ↗";
 
-  if (renderedSource !== sourceKey) {
+  if (renderedSource !== sourceKey && !position.continuation) {
     body.innerHTML = '<p class="loading">Loading source…</p>';
   }
 
@@ -1130,7 +1302,11 @@ async function renderCode(position: RenderPosition = {}): Promise<void> {
         "All changes in this step · Compared with the preceding state" +
         (focus && path ? ` · Selected ${path}:${focus[0]}–${focus[1]}` : "");
       if (position.reveal !== false) {
-        revealFocus(body);
+        if (focus) {
+          revealFocus(body, animateFocus);
+        } else {
+          revealContinuation(body, position.continuation);
+        }
       }
       return;
     }
@@ -1205,7 +1381,7 @@ async function renderCode(position: RenderPosition = {}): Promise<void> {
         return;
       }
       if (position.reveal !== false) {
-        revealFocus(body);
+        revealFocus(body, animateFocus);
       }
     });
   } catch (error) {
@@ -1370,6 +1546,12 @@ async function openFullFile(button: HTMLElement): Promise<void> {
 }
 
 async function goStep(index: number, record = true): Promise<void> {
+  cancelCodeScroll?.();
+  cancelCodeScroll = undefined;
+  const continuation =
+    Math.abs(index - step) === 1 && mode === "changes" && renderedSource === sourceIdentity()
+      ? captureContinuation(index < step)
+      : undefined;
   rememberPosition();
   root.querySelector<HTMLElement>("#resume-notice")!.hidden = true;
   step = Math.max(0, Math.min(steps.length - 1, index));
@@ -1377,8 +1559,10 @@ async function goStep(index: number, record = true): Promise<void> {
   renderedSource = "";
   const choice = defaultSelection(steps[step]);
   version = choice.version;
-  changeRegions = [];
-  renderChangeNavigation();
+  if (!continuation) {
+    changeRegions = [];
+    renderChangeNavigation();
+  }
 
   renderGuide();
   if (choice.mode === "changes" || !choice.path) {
@@ -1391,7 +1575,7 @@ async function goStep(index: number, record = true): Promise<void> {
     if (record) {
       updateLocation();
     }
-    await renderCode();
+    await renderCode({ continuation });
   } else {
     await openFile(
       choice.path,
@@ -1437,6 +1621,7 @@ async function openRegion(index: number): Promise<void> {
     return;
   }
   const at = step;
+  const animate = mode === "changes" && renderedSource === sourceIdentity();
   if (mode !== "changes") {
     const pending = openOverview();
     const ticket = requestId;
@@ -1460,7 +1645,7 @@ async function openRegion(index: number): Promise<void> {
         ?.offsetHeight ?? 0;
     const top =
       target.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
-    body.scrollTop = Math.max(
+    const destination = Math.max(
       0,
       focusScrollTop(
         body.scrollTop + inset,
@@ -1469,6 +1654,11 @@ async function openRegion(index: number): Promise<void> {
         top + target.offsetHeight,
       ) - inset,
     );
+    if (animate) {
+      cancelCodeScroll = animateScroll(body, destination, scheduleResumeSave);
+    } else {
+      body.scrollTop = destination;
+    }
     target.focus({ preventScroll: true });
   }
 }
@@ -1478,6 +1668,8 @@ function handleClick(event: MouseEvent): void {
   if (!element || (element as HTMLButtonElement).disabled) {
     return;
   }
+  cancelCodeScroll?.();
+  cancelCodeScroll = undefined;
 
   if (element.dataset.step !== undefined) {
     void goStep(Number(element.dataset.step));
