@@ -18,7 +18,7 @@
             "end": 3,
             "version": "base"
           },
-          " already accepts a name and returns a complete message. Keeping the cleanup inside that call means callers can continue supplying names in the same way."
+          " places the supplied name between `\"Hello, \"` and `\"!\"`. We can clean up the name there, so callers still ask for a greeting with the same `greet(name)` call."
         ]
       ]
     },
@@ -32,10 +32,10 @@
       },
       "paragraphs": [
         [
-          "Add `displayName` to remove spaces at the beginning and end of a name. Spaces between words remain, preserving names such as `\"Mary Ann\"`. For now, an all-space name becomes an empty string; the fallback comes after this helper is connected to the greeting."
+          "First, remove the unwanted spaces from the name itself. Add `displayName`, which calls `trim()`: `\" Ada \"` becomes `\"Ada\"`. Spaces between words stay in place, so `\"Mary Ann\"` stays `\"Mary Ann\"`."
         ],
         [
-          "The helper gives the cleanup its own name and lets `greet` concentrate on assembling the message. Keeping the expression directly in `greet` would be simpler for this small feature; the separate function makes the distinction explicit at the cost of another function to follow. Nothing calls it yet, so greetings still use the original name."
+          "Nothing calls the helper yet, so the greeting has not changed. Next, we will use its result in the message. An all-space name currently becomes an empty string; we will handle that case after connecting the helper."
         ]
       ]
     },
@@ -52,28 +52,37 @@
       },
       "paragraphs": [
         [
-          "Import `displayName` and ",
+          "Now make the greeting use the cleaned name. Import `displayName` and ",
           {
             "label": "call it inside `greet`",
             "path": "greet.ts",
-            "start": 3,
+            "start": 4,
             "end": 4,
             "version": "step",
             "view": "changes"
           },
-          " between `\"Hello, \"` and `\"!\"`. Now `\" Ada \"` becomes `\"Ada\"` before the greeting is assembled, so callers receive `\"Hello, Ada!\"` without cleaning up their inputs."
+          " where the name goes into the message. Following our example, `greet(\" Ada \")` passes `\" Ada \"` to the helper, gets back `\"Ada\"`, and returns `\"Hello, Ada!\"`."
         ],
         [
-          "Add ",
+          "Check that complete result with ",
           {
-            "label": "two checks of the full message",
+            "label": "the `\" Ada \"` test",
             "path": "greet.test.ts",
-            "start": 4,
-            "end": 7,
+            "start": 5,
+            "end": 5,
             "version": "step",
             "view": "changes"
           },
-          ": one for surrounding spaces and one for `\"Mary Ann\"`. Calling `greet` in these tests checks that the helper is actually connected, as well as preserving spaces inside a name. The existing ",
+          ". Calling `greet` here also catches forgetting to connect the helper. Then add ",
+          {
+            "label": "the `\"Mary Ann\"` test",
+            "path": "greet.test.ts",
+            "start": 6,
+            "end": 6,
+            "version": "step",
+            "view": "changes"
+          },
+          " to check that the space inside a name survives. The existing ",
           {
             "label": "`bun test` command",
             "path": "package.json",
@@ -98,7 +107,7 @@
       },
       "paragraphs": [
         [
-          "Return to `displayName` and add the ",
+          "A name containing only spaces still produces `\"Hello, !\"`: trimming leaves nothing to put in the message. Return to `displayName` and add the ",
           {
             "label": "fallback **after trimming**",
             "path": "name.ts",
@@ -107,10 +116,19 @@
             "version": "step",
             "view": "changes"
           },
-          ". That order matters: an all-space name becomes an empty string, so the helper returns `\"friend\"`. The greeting already calls this helper, so no further caller change is needed."
+          ". For `\"   \"`, `trim()` returns an empty string and `||` chooses `\"friend\"`. For `\" Ada \"`, it keeps the nonempty result `\"Ada\"`."
         ],
         [
-          "Extend the test with an all-space name and expect `\"Hello, friend!\"`. Together, the checks cover surrounding spaces, blank input, and a name with an internal space. The complete greeting now handles each case through the same call."
+          "The greeting already uses the helper, so it now returns `\"Hello, friend!\"` for that blank name. Add ",
+          {
+            "label": "a check for this result",
+            "path": "greet.test.ts",
+            "start": 6,
+            "end": 6,
+            "version": "step",
+            "view": "changes"
+          },
+          " alongside the two earlier cases."
         ]
       ]
     }
