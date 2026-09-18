@@ -26,7 +26,27 @@ Intermediate states can be incomplete: a caller may not use a new helper yet, or
 
 Context-only steps are useful for an opening, a necessary explanation of existing code, or a brief final trace. Use them deliberately. The construction sequence should advance the implementation as it explains it; a series of tours through an already completed file does not recreate building the change.
 
-For a large scope, group consecutive steps into chapters through their titles and transitions. Cover the entire requested change across those chapters. Supporting changes still need a clear role and their final captured state; an unexplained final dump of remaining files is not a complete walkthrough.
+For a large scope, group consecutive steps into chapters using the lesson's `chapters` field. Cover the entire requested change across those chapters. Supporting changes still need a clear role and their final captured state; an unexplained final dump of remaining files is not a complete walkthrough.
+
+## Make a chapter advance a concrete interaction
+
+A chapter title organizes steps; its prose must connect them. Before drafting a substantial phase, identify what the reader has already built, what is still missing, and what the phase will add. Put that short explanation in the first relevant step, alongside its first edit. Do not require a separate introduction page or a recap of the entire lesson.
+
+Choose one small, supported interaction or input that crosses the phase's important boundaries. Carry its identity or values through the places where the representation changes: a clicked object becomes an ID, an ID becomes a command, a command produces a result. Show those concrete values where they explain the connection. Merely mentioning the same feature in every step is not a continuing example; nor must every helper or asset repeat the example.
+
+Order the edits around the capabilities the reader needs next. At a transition, explain the specific gap that motivates the next addition. A cancellation path and a success path may need different cleanup; teach the difference when it determines the code, using the same interaction. If the story needs to explain an operation later, introduce its implementation then rather than installing it early and returning for a tour. Change step boundaries or cumulative snapshots when prose alone cannot repair that mismatch.
+
+These synthetic excerpts illustrate a connected sequence, not requirements for a real export feature:
+
+**Disconnected inventory:** “Add export selection state. Implement the CSV serializer. Wire the download handler.”
+
+**Opening with the first edit:** “The table already displays orders, but Export always includes every column. Let the user choose `Order` and `Total` for a smaller download. First store the dialog's chosen column keys separately from the table's visible columns, so cancelling the dialog leaves the table alone.”
+
+**Continuing through the next edit:** “We have the chosen keys, but they do not yet produce a file's contents. Make the CSV builder read those keys in order. For order `42` with total `12.50`, `[Order, Total]` produces the header `Order,Total` and the row `42,12.50`.”
+
+**Closing with an honest boundary:** “The download handler now passes the chosen keys to the builder and gives its output to the browser. Cancelling closes the dialog without downloading or changing the table. This completes the local export path; fetching additional pages of orders is still part of the next phase.”
+
+The opening, bridge, and ending belong in ordinary step paragraphs. Use them where they resolve a real change of responsibility; avoid repeated “so far / next” formulas, status cards, and recap-only steps. At the phase's end, state the resulting capability and any consequential work still to connect. Distinguish an assembled input path from a working end-to-end feature when later steps supply playback, persistence, services, or configuration. Do not imply an incomplete intermediate state has been run.
 
 ## Explain the need before the mechanics
 
@@ -45,6 +65,10 @@ The second version gives the reader a reason to care about the copy before intro
 **Teaching the operations:** “Remove spaces from the beginning and end of the name. If nothing remains, use `"friend"`. Put that result into the greeting, so an all-space name produces `"Hello, friend!"`.”
 
 Keep necessary technical names, but attach them to actions the reader can picture. Explain what a setting changes before supplying its enum name or numeric value. Preserve details that determine behavior; move through them one at a time instead of packing a parameter inventory into one sentence.
+
+For unfamiliar or consequential mechanics, explain how the important statements produce the result, not only the method's purpose. A formula may need its units, the constraint each term enforces, and a small worked example with explicit assumptions. Explain what a tuning constant controls without inventing why its exact value was chosen. Precise pointers locate this explanation's evidence; they do not substitute for the explanation itself.
+
+Choose depth from the reader's needs and the code's difficulty, not a fixed line count or the overall size of the PR. If a coherent edit is understandable with another short paragraph and a precise pointer, keep it together. Split it when distinct calculations, decisions, or state transitions each need their own explanation and can be introduced progressively. Keep routine plumbing concise; do not split every method, require numerical examples everywhere, or narrate each assignment. A large diff and an unfamiliar algorithm need not receive the same treatment.
 
 ## Ground decisions in evidence
 
@@ -88,8 +112,9 @@ Keep artifact mechanics out of the lesson: no reminders that this is a teaching 
 
 After validation, make an editorial pass over the actual lesson. The validator checks source locations and final state, not whether the explanation teaches well.
 
-1. **Follow the build without links.** Does each construction step add the code it is explaining? Can the reader understand why that edit is needed from what has come before? Split large jumps, move explanations to the edit they belong to, and remove sentences that only inventory fields or restate the title.
+1. **Follow the build without links.** Does each construction step add the code it is explaining? Can the reader understand why that edit is needed from what has come before, and how its important operations produce the result? Split large jumps, move explanations to the edit they belong to, and remove sentences that only inventory fields or restate the title.
 2. **Match claims to code.** For each paragraph describing an operation, locate the exact statements in that step's cumulative source. If the reader would have to search a long selection, another region, or another file, add a precise pointer on the relevant phrase. Check copy, guard, call, and configuration claims separately; one whole-method link does not automatically cover them all. Verify each target's version and enough surrounding context to recognize it. Do not impose a link quota or link every identifier.
 3. **Read the prose on its own.** Replace sentences that need translation with concrete objects and actions, as in the examples above. Remove incidental facts that do not explain the behavior. Where data crosses files or layers, reuse a small supported example if it makes the connection easier to follow. Keep necessary limitations with the affected claim.
+4. **Read across step and chapter boundaries.** Can the reader name the missing capability at the start, follow the example as its values or responsibilities change, and explain what has become possible at the end? Check whether each substantial transition motivates the next edit. Fix an unexplained jump in the build order, not just its wording. Confirm that the ending does not claim integration supplied by a later chapter.
 
 Revise the lesson from this pass before delivery. Do not append the checklist, a self-review report, or repeated takeaway cards to the reader's guide.
