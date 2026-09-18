@@ -28,6 +28,10 @@ Context-only steps are useful for an opening, a necessary explanation of existin
 
 For a large scope, group consecutive steps into chapters using the lesson's `chapters` field. Cover the entire requested change across those chapters. Supporting changes still need a clear role and their final captured state; an unexplained final dump of remaining files is not a complete walkthrough.
 
+Let the required explanations determine the step count. Do not assign a chapter or delegated author a step budget that encourages bundling unrelated work. A convenient source slice or whole-file adoption is not a teaching boundary: introduce consequential state and operations when their purpose is taught, even if their declarations are near the top of the final file.
+
+Tests follow the same principle. Teach the setup, action, and meaningful assertion for a new behavior or testing technique; group additional cases when they repeat that pattern. Ownership, rejected mutations, and deterministic execution are different mechanisms, even when they share a test file. “Also covers…” followed by several new behaviors is a reason to inspect the edit, not an explanation of those behaviors. Place checks near the behavior they establish when that makes the sequence easier to follow; this does not require test-first order.
+
 ## Make a chapter advance a concrete interaction
 
 A chapter title organizes steps; its prose must connect them. Before drafting a substantial phase, identify what the reader has already built, what is still missing, and what the phase will add. Put that short explanation in the first relevant step, alongside its first edit. Do not require a separate introduction page or a recap of the entire lesson.
@@ -110,11 +114,21 @@ Keep artifact mechanics out of the lesson: no reminders that this is a teaching 
 
 ## Read it back as a learner
 
-After validation, make an editorial pass over the actual lesson. The validator checks source locations and final state, not whether the explanation teaches well.
+After validation, make an editorial pass over the actual lesson. The validator checks source locations and final state, not whether the explanation teaches well. A prose-only read-through cannot reveal operations silently introduced in the code.
 
-1. **Follow the build without links.** Does each construction step add the code it is explaining? Can the reader understand why that edit is needed from what has come before, and how its important operations produce the result? Split large jumps, move explanations to the edit they belong to, and remove sentences that only inventory fields or restate the title.
+From the skill root, use the read-only report to compare the two:
+
+```sh
+node scripts/review.mjs ARTIFACT
+node scripts/review.mjs ARTIFACT --step STEP_ID
+node scripts/review.mjs ARTIFACT --step STEP_ID --all
+```
+
+The overview reports edit sizes and regions; selected-step details pair prose and resolved pointers with the actual diff against the preceding cumulative state. Details are bounded by default; use `--all` or read the relevant captured source when truncation hides the operation under review. Start with large or scattered edits and unfamiliar calculations, then check the rest of the construction sequence. Size and pointer counts identify things to inspect, not things to optimize: a large repetitive fixture can be clear, while a small formula can need substantial explanation.
+
+1. **Follow the build without links.** Start from the actual additions and removals: what new decisions, calculations, or state transitions must the reader understand here? Match each consequential operation to its explanation. If it is taught only in a later step, move the edit there; if several independent ideas arrive together, split them. If one coherent calculation is underexplained, deepen that explanation instead. Routine declarations and repeated setup need not each be narrated. Ask what the reader would still have to figure out unaided; a method-name inventory or an extra link does not answer that question.
 2. **Match claims to code.** For each paragraph describing an operation, locate the exact statements in that step's cumulative source. If the reader would have to search a long selection, another region, or another file, add a precise pointer on the relevant phrase. Check copy, guard, call, and configuration claims separately; one whole-method link does not automatically cover them all. Verify each target's version and enough surrounding context to recognize it. Do not impose a link quota or link every identifier.
 3. **Read the prose on its own.** Replace sentences that need translation with concrete objects and actions, as in the examples above. Remove incidental facts that do not explain the behavior. Where data crosses files or layers, reuse a small supported example if it makes the connection easier to follow. Keep necessary limitations with the affected claim.
 4. **Read across step and chapter boundaries.** Can the reader name the missing capability at the start, follow the example as its values or responsibilities change, and explain what has become possible at the end? Check whether each substantial transition motivates the next edit. Fix an unexplained jump in the build order, not just its wording. Confirm that the ending does not claim integration supplied by a later chapter.
 
-Revise the lesson from this pass before delivery. Do not append the checklist, a self-review report, or repeated takeaway cards to the reader's guide.
+When authors work in parallel, the assembled lesson still needs this source-and-prose review. Review chapter joins and the actual edits in each contribution; fragment validation and an author's report of completion are not substitutes. Keep brief review notes in the artifact if they help track unresolved findings, and resolve those findings in the lesson itself. Do not append the checklist, a self-review report, or repeated takeaway cards to the reader's guide.

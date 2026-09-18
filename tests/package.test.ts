@@ -143,6 +143,16 @@ test("copied and linked packages run the Node CLI without Bun, TypeScript or the
       expect(
         run(node, [join(skillRoot, "scripts/validate.mjs"), artifact, "--presentation"]),
       ).toContain("Presentation checked: 1 text comparisons; 0 coarse comparisons.");
+      expect(run(node, [join(skillRoot, "scripts/review.mjs"), artifact])).toContain("greeting");
+      const teachingReview = run(node, [
+        join(skillRoot, "scripts/review.mjs"),
+        artifact,
+        "--step",
+        "greeting",
+        "--all",
+      ]);
+      expect(teachingReview).toContain("The new module exports the greeting.");
+      expect(teachingReview).toContain('export const greeting = "Hello";');
       expect(existsSync(join(skillRoot, "package.json"))).toBe(false);
       expect(existsSync(join(skillRoot, "node_modules"))).toBe(false);
       expect(existsSync(join(skillRoot, "viewer"))).toBe(false);

@@ -29,7 +29,7 @@ console.log("Built the reusable viewer.");
 
 // Ship JavaScript so users need only Node, with no compiler or package installation.
 const runtime = await Bun.build({
-  entrypoints: ["capture", "validate", "serve"].map((name) =>
+  entrypoints: ["capture", "validate", "review", "serve"].map((name) =>
     resolve(runtimeScripts, name + ".ts"),
   ),
   outdir: runtimeScripts,
