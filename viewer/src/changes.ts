@@ -29,6 +29,10 @@ interface LineSpan {
   last: number;
 }
 
+// A created file initially has no smaller edit boundary. Retain a useful source
+// window on its next edit without inheriting hundreds of unrelated lines.
+const CREATED_FILE_CONTEXT_LINES = 80;
+
 /** Locate edits in either source, treating absent-side runs as insertion boundaries. */
 function editedSpans(rows: DiffLine[], side: "old" | "next"): LineSpan[] {
   const spans: LineSpan[] = [];
@@ -72,12 +76,12 @@ function continueRegions(
   const bounds: ChangeRegion[] = regions.map((region) => ({ ...region }));
   for (const region of previous.regions) {
     const previousEdits = editedSpans(region.rows, "next");
-    const related = previousEdits.some((earlier) =>
-      currentEdits.some(
-        (current) => current.first <= earlier.last + 1 && current.last >= earlier.first - 1,
+    const relatedEdits = currentEdits.filter((current) =>
+      previousEdits.some(
+        (earlier) => current.first <= earlier.last + 1 && current.last >= earlier.first - 1,
       ),
     );
-    if (!related) {
+    if (!relatedEdits.length) {
       continue;
     }
 
@@ -87,19 +91,36 @@ function continueRegions(
     }
     const first = survivingLines[0];
     const last = survivingLines[survivingLines.length - 1];
-    let start = -1;
-    let end = -1;
-    for (let index = 0; index < rows.length; index++) {
-      const oldLine = rows[index].old;
-      if (oldLine !== undefined && oldLine >= first && oldLine <= last) {
-        if (start < 0) {
-          start = index;
-        }
-        end = index;
-      }
+    let retainedSpans = [{ first, last }];
+    if (previous.kind === "added" && last - first + 1 > CREATED_FILE_CONTEXT_LINES) {
+      retainedSpans = relatedEdits.map((edit) => {
+        // Center around the insertion/replacement boundary when possible. Near
+        // either file edge, spend the remaining context budget on the other side.
+        const start = Math.max(
+          first,
+          Math.min(
+            edit.first - CREATED_FILE_CONTEXT_LINES / 2,
+            last - CREATED_FILE_CONTEXT_LINES + 1,
+          ),
+        );
+        return { first: start, last: start + CREATED_FILE_CONTEXT_LINES - 1 };
+      });
     }
-    if (start >= 0) {
-      bounds.push({ start, end, rows: [], continued: true });
+    for (const span of retainedSpans) {
+      let start = -1;
+      let end = -1;
+      for (let index = 0; index < rows.length; index++) {
+        const oldLine = rows[index].old;
+        if (oldLine !== undefined && oldLine >= span.first && oldLine <= span.last) {
+          if (start < 0) {
+            start = index;
+          }
+          end = index;
+        }
+      }
+      if (start >= 0) {
+        bounds.push({ start, end, rows: [], continued: true });
+      }
     }
   }
 
@@ -213,15 +234,7 @@ async function prepareFileChange(
       rows.push({ kind: "same", text: "", next: finalLine, old });
     }
     change.regions = diffRegions(rows, 3, focuses);
-    // A whole newly introduced file is not a bounded teaching excerpt. Start
-    // its next edit compactly rather than inheriting its imports and every method.
-    if (
-      preceding &&
-      preceding.kind !== "added" &&
-      !preceding.failed &&
-      !preceding.coarse &&
-      !comparison.coarse
-    ) {
+    if (preceding && !preceding.failed && !preceding.coarse && !comparison.coarse) {
       change.regions = continueRegions(rows, change.regions, preceding);
     }
     if (!change.regions.length) {

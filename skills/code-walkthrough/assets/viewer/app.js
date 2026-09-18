@@ -349,6 +349,7 @@ function defaultSelection(step) {
 }
 
 // viewer/src/changes.ts
+var CREATED_FILE_CONTEXT_LINES = 80;
 function editedSpans(rows, side) {
   const spans = [];
   let precedingLine = 0;
@@ -378,8 +379,8 @@ function continueRegions(rows, regions, previous) {
   const bounds = regions.map((region) => ({ ...region }));
   for (const region of previous.regions) {
     const previousEdits = editedSpans(region.rows, "next");
-    const related = previousEdits.some((earlier) => currentEdits.some((current) => current.first <= earlier.last + 1 && current.last >= earlier.first - 1));
-    if (!related) {
+    const relatedEdits = currentEdits.filter((current) => previousEdits.some((earlier) => current.first <= earlier.last + 1 && current.last >= earlier.first - 1));
+    if (!relatedEdits.length) {
       continue;
     }
     const survivingLines = region.rows.flatMap((row) => row.next === undefined ? [] : [row.next]);
@@ -388,19 +389,28 @@ function continueRegions(rows, regions, previous) {
     }
     const first = survivingLines[0];
     const last = survivingLines[survivingLines.length - 1];
-    let start = -1;
-    let end = -1;
-    for (let index = 0;index < rows.length; index++) {
-      const oldLine = rows[index].old;
-      if (oldLine !== undefined && oldLine >= first && oldLine <= last) {
-        if (start < 0) {
-          start = index;
-        }
-        end = index;
-      }
+    let retainedSpans = [{ first, last }];
+    if (previous.kind === "added" && last - first + 1 > CREATED_FILE_CONTEXT_LINES) {
+      retainedSpans = relatedEdits.map((edit) => {
+        const start = Math.max(first, Math.min(edit.first - CREATED_FILE_CONTEXT_LINES / 2, last - CREATED_FILE_CONTEXT_LINES + 1));
+        return { first: start, last: start + CREATED_FILE_CONTEXT_LINES - 1 };
+      });
     }
-    if (start >= 0) {
-      bounds.push({ start, end, rows: [], continued: true });
+    for (const span of retainedSpans) {
+      let start = -1;
+      let end = -1;
+      for (let index = 0;index < rows.length; index++) {
+        const oldLine = rows[index].old;
+        if (oldLine !== undefined && oldLine >= span.first && oldLine <= span.last) {
+          if (start < 0) {
+            start = index;
+          }
+          end = index;
+        }
+      }
+      if (start >= 0) {
+        bounds.push({ start, end, rows: [], continued: true });
+      }
     }
   }
   bounds.sort((left, right) => left.start - right.start);
@@ -484,7 +494,7 @@ async function prepareFileChange(path, at, readState, pointers, preceding) {
       rows.push({ kind: "same", text: "", next: finalLine, old });
     }
     change.regions = diffRegions(rows, 3, focuses);
-    if (preceding && preceding.kind !== "added" && !preceding.failed && !preceding.coarse && !comparison.coarse) {
+    if (preceding && !preceding.failed && !preceding.coarse && !comparison.coarse) {
       change.regions = continueRegions(rows, change.regions, preceding);
     }
     if (!change.regions.length) {

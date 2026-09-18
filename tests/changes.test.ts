@@ -516,10 +516,33 @@ test("coarse or unreadable predecessors cannot claim excerpt continuity", async 
   expect(unreadable[0].regions).toEqual([]);
 });
 
-test("a new method after a freshly introduced file starts with compact context", async () => {
+test("a small newly created file retains its source when the following step appends code", async () => {
+  const firstSource = Array.from({ length: 55 }, (_, index) => `introduced ${index}`);
+  const appended = Array.from({ length: 50 }, (_, index) => `appended ${index}`);
+  const states = [firstSource, [...firstSource, ...appended]];
+  const reader: SourceStateReader = async (_path, at) => {
+    if (at === -1) {
+      return { exists: false };
+    }
+    return { exists: true, text: states[at].join("\n") };
+  };
+  // Another file in the creation step must not prevent same-source continuity.
+  const first = await prepareStepChanges(["source.ts", "other.ts"], 0, reader);
+  const [second] = await prepareStepChanges(["source.ts"], 1, reader, [], first);
+  expect(second.regions).toHaveLength(1);
+  expect(second.regions[0].continued).toBe(true);
+  expect(
+    second.regions[0].rows.filter((row) => row.kind === "same").map((row) => row.text),
+  ).toEqual(firstSource);
+  expect(second.regions[0].rows.filter((row) => row.kind === "add").map((row) => row.text)).toEqual(
+    appended,
+  );
+});
+
+test("a new method after a large freshly introduced file retains only nearby context", async () => {
   const firstSource = [
     "import { helper } from 'helper';",
-    ...Array.from({ length: 35 }, (_, index) => `existing ${index}`),
+    ...Array.from({ length: 200 }, (_, index) => `existing ${index}`),
     "function first() {",
     "  helper();",
     "}",
@@ -535,9 +558,52 @@ test("a new method after a freshly introduced file starts with compact context",
   expect(first[0].kind).toBe("added");
   const [second] = await prepareStepChanges(["source.ts"], 2, reader, [], first);
   expect(second.regions).toHaveLength(1);
-  expect(second.regions[0].continued).toBeUndefined();
+  expect(second.regions[0].continued).toBe(true);
   expect(second.regions[0].rows.some((row) => row.text.includes("import"))).toBe(false);
-  expect(second.regions[0].rows.filter((row) => row.kind === "same")).toHaveLength(3);
+  expect(second.regions[0].rows.filter((row) => row.kind === "same")).toHaveLength(80);
+  expect(second.regions[0].rows.at(-1)?.text).toBe("}");
+});
+
+test("edits inside a large created file retain separate bounded windows in exact coordinates", async () => {
+  const firstSource = Array.from({ length: 500 }, (_, index) => `introduced ${index + 1}`);
+  const secondSource = [...firstSource];
+  secondSource[150] = "replacement near start";
+  secondSource[400] = "replacement near end";
+  secondSource.unshift("new preamble");
+  const thirdSource = [...secondSource];
+  thirdSource[250] = "unrelated later edit";
+  const states = [firstSource, secondSource, thirdSource];
+  const reader: SourceStateReader = async (_path, at) => {
+    if (at === -1) {
+      return { exists: false };
+    }
+    return { exists: true, text: states[at].join("\n") };
+  };
+  const first = await prepareStepChanges(["source.ts"], 0, reader);
+  const second = await prepareStepChanges(["source.ts"], 1, reader, [], first);
+  expect(second[0].regions).toHaveLength(3);
+  for (const region of second[0].regions) {
+    expect(region.continued).toBe(true);
+    expect(region.rows.filter((row) => row.old !== undefined)).toHaveLength(80);
+  }
+  const rows = second[0].regions.flatMap((region) => region.rows);
+  expect(rows.filter((row) => row.kind === "add").map((row) => row.text)).toEqual([
+    "new preamble",
+    "replacement near start",
+    "replacement near end",
+  ]);
+  expect(rows.find((row) => row.text === "introduced 400")).toEqual({
+    kind: "same",
+    text: "introduced 400",
+    old: 400,
+    next: 401,
+  });
+  expect(rows.some((row) => row.text === "introduced 250")).toBe(false);
+
+  const [third] = await prepareStepChanges(["source.ts"], 2, reader, [], second);
+  expect(third.regions).toHaveLength(1);
+  expect(third.regions[0].continued).toBeUndefined();
+  expect(third.regions[0].rows).toHaveLength(8);
 });
 
 test("a separate method after a blank line does not inherit the previous method excerpt", async () => {
