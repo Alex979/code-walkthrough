@@ -2,7 +2,6 @@ import {
   configureLesson,
   changeAt,
   defaultSelection,
-  diffLines,
   focusScrollTop,
   fileExists,
   fileStatus,
@@ -14,8 +13,9 @@ import {
   type DisplayMode,
 } from "./model";
 import { prepareStepChanges } from "./changes";
+import { compareLines, type LineComparison } from "../../skills/code-walkthrough/scripts/diff";
 import { renderInline } from "./prose";
-import { ReadingMemory, type ReadingPosition } from "./navigation";
+import { fullFileFocus, isFocusRendered, ReadingMemory, type ReadingPosition } from "./navigation";
 import type {
   FileInfo,
   Manifest,
@@ -723,21 +723,14 @@ function renderFilePlaceholder(selectedFile: FileInfo | undefined): string {
   `;
 }
 
-function fullFileRows(sourceLines: string[], previous: string, current: string): DiffLine[] {
-  let addedLines = new Set<number>();
+function fullFileRows(sourceLines: string[], comparisonRows: DiffLine[]): DiffLine[] {
+  const addedLines = new Set<number>();
   // Every file introduced by this step keeps its additions when opened through
   // a reference, tree entry, or tab; the default target is not a special case.
   if (version === "step") {
-    try {
-      addedLines = new Set(
-        diffLines(previous, current)
-          .filter((row) => row.kind === "add")
-          .map((row) => row.next!),
-      );
-    } catch (error) {
-      // Full-file reading remains available when an inline diff exceeds its budget.
-      if (!(error instanceof RangeError)) {
-        throw error;
+    for (const row of comparisonRows) {
+      if (row.kind === "add" && row.next !== undefined) {
+        addedLines.add(row.next);
       }
     }
   }
@@ -747,6 +740,10 @@ function fullFileRows(sourceLines: string[], previous: string, current: string):
     next: index + 1,
     kind: addedLines.has(index + 1) ? "add" : "same",
   }));
+}
+
+function coarseComparisonNote(): string {
+  return '<p class="code-message">Some large sections are shown as complete replacements. All source lines are preserved; unchanged lines inside those sections may also be marked as removed and added.</p>';
 }
 
 function codeStatus(lineCount: number): string {
@@ -819,6 +816,9 @@ function loadStepChanges(at: number): Promise<{ html: string; regions: ChangeReg
           </section>`;
             })
             .join("");
+          if (change.coarse) {
+            content = coarseComparisonNote() + content;
+          }
         }
 
         const sectionId = `change-file-${fileIndex}`;
@@ -964,6 +964,31 @@ async function renderCode(position: RenderPosition = {}): Promise<void> {
       body.scrollTop = savedScroll;
       body.scrollLeft = savedHorizontal;
       renderedSource = sourceKey;
+      const renderedLines = Array.from(
+        changeArticle(path)?.querySelectorAll<HTMLElement>("[data-line]") ?? [],
+        (row) => Number(row.dataset.line),
+      );
+      if (focus && path && !isFocusRendered(focus, renderedLines)) {
+        // Deep links and restored history pass through this renderer too. A
+        // compact view must never report a selection that it cannot reveal.
+        // Keep the same cumulative source and resolved range in the full file.
+        readingMemory.save(steps[step].id, {
+          path: "",
+          version: "step",
+          mode: "changes",
+          scrollTop: savedScroll,
+          scrollLeft: savedHorizontal,
+          expandDiff: false,
+        });
+        mode = "file";
+        expandDiff = false;
+        reconcileSelection();
+        renderTree();
+        renderTabs();
+        history.replaceState(null, "", makeLocation(step, path, version, focus, mode));
+        await renderCode();
+        return;
+      }
       root.querySelector("#code-status")!.textContent =
         "All changes in this step · Compared with the preceding state" +
         (focus && path ? ` · Selected ${path}:${focus[0]}–${focus[1]}` : "");
@@ -1007,14 +1032,33 @@ async function renderCode(position: RenderPosition = {}): Promise<void> {
     }
 
     const sourceLines = (currentText ?? "").split("\n");
+    let comparison: LineComparison = { rows: [], coarse: false };
+    let comparisonUnavailable = false;
+    if (mode === "diff" || version === "step") {
+      try {
+        comparison = compareLines(previous ?? "", currentText ?? "");
+      } catch (error) {
+        if (mode === "diff") {
+          throw error;
+        }
+        // Opening source is the recovery path for an unavailable comparison.
+        // A failure to calculate coloring must not also hide the captured file.
+        comparisonUnavailable = true;
+      }
+    }
     let rows: DiffLine[];
     if (mode === "diff") {
-      rows = diffLines(previous ?? "", currentText ?? "");
+      rows = comparison.rows;
     } else {
-      rows = fullFileRows(sourceLines, previous ?? "", currentText ?? "");
+      rows = fullFileRows(sourceLines, comparison.rows);
     }
 
-    body.innerHTML = renderRows(rows, mode === "diff");
+    let comparisonNote = comparison.coarse ? coarseComparisonNote() : "";
+    if (comparisonUnavailable) {
+      comparisonNote =
+        '<p class="code-message">Change highlighting is unavailable. The captured source is shown below.</p>';
+    }
+    body.innerHTML = comparisonNote + renderRows(rows, mode === "diff");
     root.querySelector("#code-status")!.textContent = codeStatus(sourceLines.length);
     body.scrollTop = savedScroll;
     body.scrollLeft = savedHorizontal;
@@ -1174,11 +1218,13 @@ async function openFullFile(button: HTMLElement): Promise<void> {
   const first = visibleRows.find((row) => row.classList.contains("add")) ?? visibleRows[0];
   // Current diff coordinates belong to the cumulative source, never to base.
   const line = selectedVersion === "step" && first ? Number(first.dataset.line) : undefined;
+  const targetFocus = fullFileFocus(filePath, selectedVersion, line, { path, version, focus });
   await openFile(filePath, {
     label: "",
     path: filePath,
     version: selectedVersion,
-    start: line,
+    start: targetFocus?.[0],
+    end: targetFocus?.[1],
   });
 }
 

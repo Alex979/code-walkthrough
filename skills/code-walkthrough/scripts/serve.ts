@@ -172,7 +172,7 @@ async function startFromCommandLine(): Promise<void> {
   const extension = import.meta.url.endsWith(".ts") ? "ts" : "mjs";
   const validation = spawnSync(
     process.execPath,
-    [resolve(scriptDirectory, `validate.${extension}`), directory],
+    [resolve(scriptDirectory, `validate.${extension}`), directory, "--presentation"],
     { stdio: "inherit", windowsHide: true },
   );
   if (validation.error) {

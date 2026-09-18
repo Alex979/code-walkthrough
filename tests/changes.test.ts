@@ -155,20 +155,44 @@ test("a fresh preparation retries a previously failed file", async () => {
   expect(recovered[0].regions[0].rows).toEqual([{ kind: "add", text: "recovered", next: 1 }]);
 });
 
-test("bounded diff failures preserve the file entry and other file changes", async () => {
+test("large replacements keep every removed and added line alongside other file changes", async () => {
   const before = Array.from({ length: 2_000 }, (_, index) => `before ${index}`).join("\n");
   const after = Array.from({ length: 2_000 }, (_, index) => `after ${index}`).join("\n");
-  const changes = await prepareStepChanges(["large.ts", "small.ts"], 1, async (path, at) => {
-    if (path === "large.ts") {
-      return { exists: true, text: at === 0 ? before : after };
-    }
-    return { exists: true, text: at === 0 ? "old" : "new" };
-  });
+  const changes = await prepareStepChanges(
+    ["large.ts", "small.ts"],
+    1,
+    async (path, at) => {
+      if (path === "large.ts") {
+        return { exists: true, text: at === 0 ? before : after };
+      }
+      return { exists: true, text: at === 0 ? "old" : "new" };
+    },
+    [{ label: "deep target", path: "large.ts", view: "changes", start: 1750, end: 1752 }],
+  );
 
   expect(changes.map((change) => change.path)).toEqual(["large.ts", "small.ts"]);
-  expect(changes[0].regions).toEqual([]);
+  const rows = changes[0].regions.flatMap((region) => region.rows);
+  expect(
+    rows
+      .filter((row) => row.kind !== "add")
+      .map((row) => row.text)
+      .join("\n"),
+  ).toBe(before);
+  expect(
+    rows
+      .filter((row) => row.kind !== "remove")
+      .map((row) => row.text)
+      .join("\n"),
+  ).toBe(after);
+  expect(rows.filter((row) => row.kind === "add").map((row) => row.next)).toEqual(
+    Array.from({ length: 2000 }, (_, index) => index + 1),
+  );
   expect(changes[0].failed).toBe(false);
-  expect(changes[0].notice).toContain("too large for an inline comparison");
+  expect(changes[0].coarse).toBe(true);
+  expect(changes[0].notice).toBeUndefined();
+  expect(
+    rows.filter((row) => row.next && row.next >= 1750 && row.next <= 1752).map((row) => row.text),
+  ).toEqual(["after 1749", "after 1750", "after 1751"]);
   expect(changes[1].regions).toHaveLength(1);
 });
 

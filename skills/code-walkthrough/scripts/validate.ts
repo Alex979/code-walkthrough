@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { compareLines } from "./diff";
 import { isMainModule, requireSupportedRuntime } from "./runtime";
 import type { BlobInfo, Lesson, Manifest, SourceLink, Version } from "./types";
 
@@ -30,6 +31,18 @@ export interface ValidationResult {
   files: number;
   steps: number;
   textBlobs: number;
+  presentation?: PresentationCheck;
+}
+
+export interface PresentationCheck {
+  comparisons: number;
+  /** Exact source is preserved, but these comparisons use coarse replacement blocks. */
+  coarse: { step: string; path: string }[];
+}
+
+export interface ValidationOptions {
+  /** Exercise the same bounded comparison engine used by the viewer. */
+  presentation?: boolean;
 }
 
 export class ValidationError extends Error {
@@ -548,7 +561,10 @@ function validateFinalState(
 }
 
 /** Validate a captured manifest, its textual blobs, and the authored cumulative lesson. */
-export async function validate(dir: string): Promise<ValidationResult> {
+export async function validate(
+  dir: string,
+  options: ValidationOptions = {},
+): Promise<ValidationResult> {
   const errors = new Problems();
   if (!isNonemptyString(dir)) {
     throw new ValidationError(["artifact directory: expected a nonempty path string."]);
@@ -581,6 +597,9 @@ export async function validate(dir: string): Promise<ValidationResult> {
   // Each step sees the prior step's state plus its own changes. Captured base/head
   // remain fixed so explicit version selections never drift with the lesson.
   const current = new Map(base);
+  const presentation: PresentationCheck | undefined = options.presentation
+    ? { comparisons: 0, coarse: [] }
+    : undefined;
 
   function validateSelection(
     path: string,
@@ -699,6 +718,7 @@ export async function validate(dir: string): Promise<ValidationResult> {
 
   for (const [index, step] of lesson.steps.entries()) {
     const at = `step ${JSON.stringify(step.id)} [${index}]`;
+    const previous = presentation ? new Map(current) : undefined;
     // A selection in this step must resolve after its changes have been applied.
     applyChanges(step, at);
 
@@ -721,26 +741,70 @@ export async function validate(dir: string): Promise<ValidationResult> {
         );
       }
     }
+
+    if (presentation && previous && !errors.items.length) {
+      for (const path of Object.keys(step.changes ?? {})) {
+        const before = previous.get(path);
+        const after = current.get(path);
+        // Opaque assets have an intentional placeholder, not a failed text diff.
+        if ((before && before.info.kind !== "text") || (after && after.info.kind !== "text")) {
+          continue;
+        }
+        try {
+          const comparison = compareLines(before?.text ?? "", after?.text ?? "");
+          presentation.comparisons++;
+          if (comparison.coarse) {
+            presentation.coarse.push({ step: step.id, path });
+          }
+        } catch (error) {
+          errors.add(
+            `${at}.changes[${JSON.stringify(path)}]: viewer comparison could not be prepared: ${errorText(error)}`,
+          );
+        }
+      }
+    }
   }
 
   validateFinalState(manifest, current, head, errors);
   errors.throwIfAny();
-  return { ok: true, files: files.size, steps: lesson.steps.length, textBlobs };
+  return {
+    ok: true,
+    files: files.size,
+    steps: lesson.steps.length,
+    textBlobs,
+    ...(presentation ? { presentation } : {}),
+  };
 }
 
 if (isMainModule(import.meta.url)) {
   try {
     requireSupportedRuntime();
-    if (process.argv.length === 3 && process.argv[2] === "--help") {
-      console.log("Usage: node scripts/validate.mjs ARTIFACT_DIR");
-    } else if (process.argv.length !== 3) {
-      console.error("Usage: node scripts/validate.mjs ARTIFACT_DIR");
+    const args = process.argv.slice(2);
+    const usage = "Usage: node scripts/validate.mjs ARTIFACT_DIR [--presentation]";
+    if (args.length === 1 && args[0] === "--help") {
+      console.log(usage);
+    } else if (
+      !args[0] ||
+      args[0].startsWith("--") ||
+      !(args.length === 1 || (args.length === 2 && args[1] === "--presentation"))
+    ) {
+      console.error(usage);
       process.exitCode = 2;
     } else {
-      const result = await validate(process.argv[2]);
+      const result = await validate(args[0], { presentation: args[1] === "--presentation" });
       console.log(
         `Valid artifact: ${result.files} files, ${result.steps} steps, ${result.textBlobs} text blobs.`,
       );
+      if (result.presentation) {
+        console.log(
+          `Presentation checked: ${result.presentation.comparisons} text comparisons; ${result.presentation.coarse.length} coarse comparisons.`,
+        );
+        for (const item of result.presentation.coarse) {
+          console.warn(
+            `Review step ${JSON.stringify(item.step)}, ${JSON.stringify(item.path)}: the viewer preserves all lines but uses coarse replacement blocks. Check whether the explanation remains easy to follow.`,
+          );
+        }
+      }
     }
   } catch (error) {
     console.error(

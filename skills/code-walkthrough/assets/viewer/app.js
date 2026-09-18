@@ -1,3 +1,182 @@
+// skills/code-walkthrough/scripts/diff.ts
+var LCS_CELL_BUDGET = 3000000;
+function sourceLines(source) {
+  if (!source) {
+    return [];
+  }
+  return source.replaceAll(`\r
+`, `
+`).replace(/\n$/, "").split(`
+`);
+}
+function uniquePositions(lines, start, end) {
+  const positions = new Map;
+  for (let index = start;index < end; index++) {
+    const text = lines[index];
+    positions.set(text, positions.has(text) ? -1 : index);
+  }
+  return positions;
+}
+function patienceAnchors(before, after, span) {
+  const beforePositions = uniquePositions(before, span.beforeStart, span.beforeEnd);
+  const afterPositions = uniquePositions(after, span.afterStart, span.afterEnd);
+  const candidates = [];
+  for (const [text, beforeIndex] of beforePositions) {
+    const afterIndex = afterPositions.get(text);
+    if (beforeIndex >= 0 && afterIndex !== undefined && afterIndex >= 0) {
+      candidates.push({ before: beforeIndex, after: afterIndex });
+    }
+  }
+  const tails = [];
+  const predecessors = new Int32Array(candidates.length).fill(-1);
+  for (let index2 = 0;index2 < candidates.length; index2++) {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = low + high >>> 1;
+      if (candidates[tails[middle]].after < candidates[index2].after) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    if (low > 0) {
+      predecessors[index2] = tails[low - 1];
+    }
+    tails[low] = index2;
+  }
+  const anchors = [];
+  let index = tails.at(-1) ?? -1;
+  while (index >= 0) {
+    anchors.push(candidates[index]);
+    index = predecessors[index];
+  }
+  return anchors.reverse();
+}
+function appendExactDiff(before, after, span, rows) {
+  const beforeLength = span.beforeEnd - span.beforeStart;
+  const afterLength = span.afterEnd - span.afterStart;
+  const width = afterLength + 1;
+  const table = new Uint32Array((beforeLength + 1) * width);
+  for (let old2 = beforeLength - 1;old2 >= 0; old2--) {
+    for (let next2 = afterLength - 1;next2 >= 0; next2--) {
+      const cell = old2 * width + next2;
+      if (before[span.beforeStart + old2] === after[span.afterStart + next2]) {
+        table[cell] = table[(old2 + 1) * width + next2 + 1] + 1;
+      } else {
+        table[cell] = Math.max(table[(old2 + 1) * width + next2], table[cell + 1]);
+      }
+    }
+  }
+  let old = span.beforeStart;
+  let next = span.afterStart;
+  while (old < span.beforeEnd || next < span.afterEnd) {
+    const hasBefore = old < span.beforeEnd;
+    const hasAfter = next < span.afterEnd;
+    const cell = (old - span.beforeStart) * width + next - span.afterStart;
+    if (hasBefore && hasAfter && before[old] === after[next]) {
+      rows.push({ kind: "same", text: before[old], old: old + 1, next: next + 1 });
+      old++;
+      next++;
+    } else if (hasAfter && (!hasBefore || table[cell + 1] > table[cell + width])) {
+      rows.push({ kind: "add", text: after[next], next: next + 1 });
+      next++;
+    } else {
+      rows.push({ kind: "remove", text: before[old], old: old + 1 });
+      old++;
+    }
+  }
+}
+function compareLines(before, after) {
+  const beforeLines = sourceLines(before);
+  const afterLines = sourceLines(after);
+  const rows = [];
+  const pending = [
+    {
+      beforeStart: 0,
+      beforeEnd: beforeLines.length,
+      afterStart: 0,
+      afterEnd: afterLines.length
+    }
+  ];
+  let remainingCells = LCS_CELL_BUDGET;
+  let remainingScans = (beforeLines.length + afterLines.length) * 8;
+  let coarse = false;
+  while (pending.length > 0) {
+    const span = pending.pop();
+    while (span.beforeStart < span.beforeEnd && span.afterStart < span.afterEnd && beforeLines[span.beforeStart] === afterLines[span.afterStart]) {
+      rows.push({
+        kind: "same",
+        text: beforeLines[span.beforeStart],
+        old: span.beforeStart + 1,
+        next: span.afterStart + 1
+      });
+      span.beforeStart++;
+      span.afterStart++;
+    }
+    const beforeEnd = span.beforeEnd;
+    const afterEnd = span.afterEnd;
+    while (span.beforeEnd > span.beforeStart && span.afterEnd > span.afterStart && beforeLines[span.beforeEnd - 1] === afterLines[span.afterEnd - 1]) {
+      span.beforeEnd--;
+      span.afterEnd--;
+    }
+    if (span.beforeEnd < beforeEnd) {
+      pending.push({
+        beforeStart: span.beforeEnd,
+        beforeEnd,
+        afterStart: span.afterEnd,
+        afterEnd
+      });
+    }
+    const beforeLength = span.beforeEnd - span.beforeStart;
+    const afterLength = span.afterEnd - span.afterStart;
+    const cells = (beforeLength + 1) * (afterLength + 1);
+    if (beforeLength > 0 && afterLength > 0 && cells <= remainingCells) {
+      remainingCells -= cells;
+      appendExactDiff(beforeLines, afterLines, span, rows);
+      continue;
+    }
+    if (beforeLength > 0 && afterLength > 0) {
+      const scanSize = beforeLength + afterLength;
+      if (scanSize <= remainingScans) {
+        remainingScans -= scanSize;
+        const anchors = patienceAnchors(beforeLines, afterLines, span);
+        if (anchors.length > 0) {
+          let oldEnd = span.beforeEnd;
+          let nextEnd = span.afterEnd;
+          for (let index = anchors.length - 1;index >= 0; index--) {
+            const anchor = anchors[index];
+            pending.push({
+              beforeStart: anchor.before + 1,
+              beforeEnd: oldEnd,
+              afterStart: anchor.after + 1,
+              afterEnd: nextEnd
+            });
+            pending.push({
+              beforeStart: anchor.before,
+              beforeEnd: anchor.before + 1,
+              afterStart: anchor.after,
+              afterEnd: anchor.after + 1
+            });
+            oldEnd = anchor.before;
+            nextEnd = anchor.after;
+          }
+          pending.push({ ...span, beforeEnd: oldEnd, afterEnd: nextEnd });
+          continue;
+        }
+      }
+      coarse = true;
+    }
+    for (let index = span.beforeStart;index < span.beforeEnd; index++) {
+      rows.push({ kind: "remove", text: beforeLines[index], old: index + 1 });
+    }
+    for (let index = span.afterStart;index < span.afterEnd; index++) {
+      rows.push({ kind: "add", text: afterLines[index], next: index + 1 });
+    }
+  }
+  return { rows, coarse };
+}
+
 // viewer/src/model.ts
 var steps = [];
 function configureLesson(value) {
@@ -162,86 +341,6 @@ function focusScrollTop(scrollTop, viewportHeight, targetTop, targetBottom) {
   }
   return Math.max(0, targetBottom - viewportHeight + context);
 }
-function diffLines(before, after) {
-  const beforeLines = normalize(before).replace(/\n$/, "").split(`
-`);
-  const afterLines = normalize(after).replace(/\n$/, "").split(`
-`);
-  if (!before) {
-    beforeLines.length = 0;
-  }
-  if (!after) {
-    afterLines.length = 0;
-  }
-  let prefixLength = 0;
-  while (prefixLength < beforeLines.length && prefixLength < afterLines.length && beforeLines[prefixLength] === afterLines[prefixLength]) {
-    prefixLength++;
-  }
-  let beforeEnd = beforeLines.length;
-  let afterEnd = afterLines.length;
-  while (beforeEnd > prefixLength && afterEnd > prefixLength && beforeLines[beforeEnd - 1] === afterLines[afterEnd - 1]) {
-    beforeEnd--;
-    afterEnd--;
-  }
-  const beforeLength = beforeEnd - prefixLength;
-  const afterLength = afterEnd - prefixLength;
-  if (beforeLength * afterLength > 3000000) {
-    throw new RangeError("This diff is too large for an inline comparison. Use Full file to read either version.");
-  }
-  const width = afterLength + 1;
-  const table = new Uint32Array((beforeLength + 1) * width);
-  for (let beforeIndex2 = beforeLength - 1;beforeIndex2 >= 0; beforeIndex2--) {
-    for (let afterIndex2 = afterLength - 1;afterIndex2 >= 0; afterIndex2--) {
-      const cell = beforeIndex2 * width + afterIndex2;
-      if (beforeLines[prefixLength + beforeIndex2] === afterLines[prefixLength + afterIndex2]) {
-        table[cell] = table[(beforeIndex2 + 1) * width + afterIndex2 + 1] + 1;
-      } else {
-        const skipBefore = table[(beforeIndex2 + 1) * width + afterIndex2];
-        const skipAfter = table[beforeIndex2 * width + afterIndex2 + 1];
-        table[cell] = Math.max(skipBefore, skipAfter);
-      }
-    }
-  }
-  const result = [];
-  for (let index = 0;index < prefixLength; index++) {
-    result.push({ kind: "same", text: beforeLines[index], old: index + 1, next: index + 1 });
-  }
-  let beforeIndex = prefixLength;
-  let afterIndex = prefixLength;
-  while (beforeIndex < beforeEnd || afterIndex < afterEnd) {
-    const hasBefore = beforeIndex < beforeEnd;
-    const hasAfter = afterIndex < afterEnd;
-    const tableBefore = beforeIndex - prefixLength;
-    const tableAfter = afterIndex - prefixLength;
-    if (hasBefore && hasAfter && beforeLines[beforeIndex] === afterLines[afterIndex]) {
-      result.push({
-        kind: "same",
-        text: beforeLines[beforeIndex],
-        old: beforeIndex + 1,
-        next: afterIndex + 1
-      });
-      beforeIndex++;
-      afterIndex++;
-    } else if (hasAfter && (!hasBefore || table[tableBefore * width + tableAfter + 1] > table[(tableBefore + 1) * width + tableAfter])) {
-      result.push({ kind: "add", text: afterLines[afterIndex], next: afterIndex + 1 });
-      afterIndex++;
-    } else {
-      result.push({ kind: "remove", text: beforeLines[beforeIndex], old: beforeIndex + 1 });
-      beforeIndex++;
-    }
-  }
-  while (beforeIndex < beforeLines.length) {
-    result.push({
-      kind: "same",
-      text: beforeLines[beforeIndex],
-      old: beforeIndex + 1,
-      next: afterIndex + 1
-    });
-    beforeIndex++;
-    afterIndex++;
-  }
-  return result;
-}
 function defaultSelection(step) {
   if (Object.keys(step.changes ?? {}).length > 0) {
     return { path: "", version: "step", mode: "changes" };
@@ -301,7 +400,11 @@ async function prepareFileChange(path, at, readState, pointers) {
         }
       }
     }
-    const rows = diffLines(previousText, currentText);
+    const comparison = compareLines(previousText, currentText);
+    const rows = comparison.rows;
+    if (comparison.coarse) {
+      change.coarse = true;
+    }
     const currentLines = normalize(currentText).split(`
 `);
     const finalLine = currentLines.length;
@@ -316,10 +419,9 @@ async function prepareFileChange(path, at, readState, pointers) {
       change.notice = "No visible line differences. File bytes or metadata may have changed.";
     }
   } catch (error) {
-    if (!(error instanceof RangeError)) {
-      throw error;
-    }
-    change.notice = error.message;
+    const message = error instanceof Error ? error.message : String(error);
+    change.notice = `Could not compare this file's changes: ${message}`;
+    change.failed = true;
   }
   return change;
 }
@@ -428,6 +530,28 @@ function renderInline(text) {
 }
 
 // viewer/src/navigation.ts
+function isFocusRendered(focus, renderedLines) {
+  if (!focus) {
+    return true;
+  }
+  const lines = new Set(renderedLines);
+  for (let line = focus[0];line <= focus[1]; line++) {
+    if (!lines.has(line)) {
+      return false;
+    }
+  }
+  return true;
+}
+function fullFileFocus(filePath, targetVersion, visibleLine, selection) {
+  if (visibleLine !== undefined) {
+    return [visibleLine, visibleLine];
+  }
+  if (filePath === selection.path && targetVersion === selection.version && selection.focus) {
+    return [...selection.focus];
+  }
+  return;
+}
+
 class ReadingMemory {
   positions = new Map;
   key(stepId, path, overview) {
@@ -997,22 +1121,23 @@ function renderFilePlaceholder(selectedFile) {
     </div>
   `;
 }
-function fullFileRows(sourceLines, previous, current) {
-  let addedLines = new Set;
+function fullFileRows(sourceLines2, comparisonRows) {
+  const addedLines = new Set;
   if (version === "step") {
-    try {
-      addedLines = new Set(diffLines(previous, current).filter((row) => row.kind === "add").map((row) => row.next));
-    } catch (error) {
-      if (!(error instanceof RangeError)) {
-        throw error;
+    for (const row of comparisonRows) {
+      if (row.kind === "add" && row.next !== undefined) {
+        addedLines.add(row.next);
       }
     }
   }
-  return sourceLines.map((text, index) => ({
+  return sourceLines2.map((text, index) => ({
     text,
     next: index + 1,
     kind: addedLines.has(index + 1) ? "add" : "same"
   }));
+}
+function coarseComparisonNote() {
+  return '<p class="code-message">Some large sections are shown as complete replacements. All source lines are preserved; unchanged lines inside those sections may also be marked as removed and added.</p>';
 }
 function codeStatus(lineCount) {
   let status = `${lineCount} lines`;
@@ -1067,6 +1192,9 @@ function loadStepChanges(at) {
             ${region.rows.map((row) => renderCodeRow(row, true, filePath, null)).join("")}
           </section>`;
         }).join("");
+        if (change.coarse) {
+          content = coarseComparisonNote() + content;
+        }
       }
       const sectionId = `change-file-${fileIndex}`;
       if (!regions.length) {
@@ -1178,6 +1306,25 @@ async function renderCode(position = {}) {
       body.scrollTop = savedScroll;
       body.scrollLeft = savedHorizontal;
       renderedSource = sourceKey;
+      const renderedLines = Array.from(changeArticle(path)?.querySelectorAll("[data-line]") ?? [], (row) => Number(row.dataset.line));
+      if (focus && path && !isFocusRendered(focus, renderedLines)) {
+        readingMemory.save(steps2[step].id, {
+          path: "",
+          version: "step",
+          mode: "changes",
+          scrollTop: savedScroll,
+          scrollLeft: savedHorizontal,
+          expandDiff: false
+        });
+        mode = "file";
+        expandDiff = false;
+        reconcileSelection();
+        renderTree();
+        renderTabs();
+        history.replaceState(null, "", makeLocation(step, path, version, focus, mode));
+        await renderCode();
+        return;
+      }
       root.querySelector("#code-status").textContent = "All changes in this step · Compared with the preceding state" + (focus && path ? ` · Selected ${path}:${focus[0]}–${focus[1]}` : "");
       if (position.reveal !== false) {
         revealFocus(body);
@@ -1209,16 +1356,32 @@ async function renderCode(position = {}) {
     if (ticket !== requestId) {
       return;
     }
-    const sourceLines = (currentText ?? "").split(`
+    const sourceLines2 = (currentText ?? "").split(`
 `);
+    let comparison = { rows: [], coarse: false };
+    let comparisonUnavailable = false;
+    if (mode === "diff" || version === "step") {
+      try {
+        comparison = compareLines(previous ?? "", currentText ?? "");
+      } catch (error) {
+        if (mode === "diff") {
+          throw error;
+        }
+        comparisonUnavailable = true;
+      }
+    }
     let rows;
     if (mode === "diff") {
-      rows = diffLines(previous ?? "", currentText ?? "");
+      rows = comparison.rows;
     } else {
-      rows = fullFileRows(sourceLines, previous ?? "", currentText ?? "");
+      rows = fullFileRows(sourceLines2, comparison.rows);
     }
-    body.innerHTML = renderRows(rows, mode === "diff");
-    root.querySelector("#code-status").textContent = codeStatus(sourceLines.length);
+    let comparisonNote = comparison.coarse ? coarseComparisonNote() : "";
+    if (comparisonUnavailable) {
+      comparisonNote = '<p class="code-message">Change highlighting is unavailable. The captured source is shown below.</p>';
+    }
+    body.innerHTML = comparisonNote + renderRows(rows, mode === "diff");
+    root.querySelector("#code-status").textContent = codeStatus(sourceLines2.length);
     body.scrollTop = savedScroll;
     body.scrollLeft = savedHorizontal;
     renderedSource = sourceKey;
@@ -1352,11 +1515,13 @@ async function openFullFile(button) {
   const visibleRows = Array.from(article?.querySelectorAll(".code-line[data-line]") ?? []).filter((row) => row.getBoundingClientRect().bottom > visibleTop && row.getBoundingClientRect().top < visibleBottom);
   const first = visibleRows.find((row) => row.classList.contains("add")) ?? visibleRows[0];
   const line = selectedVersion === "step" && first ? Number(first.dataset.line) : undefined;
+  const targetFocus = fullFileFocus(filePath, selectedVersion, line, { path, version, focus });
   await openFile(filePath, {
     label: "",
     path: filePath,
     version: selectedVersion,
-    start: line
+    start: targetFocus?.[0],
+    end: targetFocus?.[1]
   });
 }
 async function goStep(index, record = true) {

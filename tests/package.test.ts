@@ -139,6 +139,9 @@ test("copied and linked packages run the Node CLI without Bun, TypeScript or the
       expect(run(node, [join(skillRoot, "scripts/validate.mjs"), artifact])).toContain(
         "Valid artifact:",
       );
+      expect(
+        run(node, [join(skillRoot, "scripts/validate.mjs"), artifact, "--presentation"]),
+      ).toContain("Presentation checked: 1 text comparisons; 0 coarse comparisons.");
       expect(existsSync(join(skillRoot, "package.json"))).toBe(false);
       expect(existsSync(join(skillRoot, "node_modules"))).toBe(false);
       expect(existsSync(join(skillRoot, "viewer"))).toBe(false);

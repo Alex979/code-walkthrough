@@ -1,5 +1,33 @@
 import { expect, test } from "bun:test";
-import { ReadingMemory, type ReadingPosition } from "../viewer/src/navigation";
+import {
+  fullFileFocus,
+  isFocusRendered,
+  ReadingMemory,
+  type ReadingPosition,
+} from "../viewer/src/navigation";
+
+test("overview selections require their whole current-source range to be rendered", () => {
+  expect(isFocusRendered([70, 72], [69, 70, 71, 72, 73])).toBe(true);
+  expect(isFocusRendered([70, 72], [70, 72])).toBe(false);
+  expect(isFocusRendered([70, 72], [])).toBe(false);
+  expect(isFocusRendered([70, 72], [70, 70, 72])).toBe(false);
+  expect(isFocusRendered(undefined, [])).toBe(true);
+});
+
+test("full-file navigation retains a requested range when the overview has no visible rows", () => {
+  const selection = {
+    path: "scene.unity",
+    version: "step" as const,
+    focus: [7100, 7120] as [number, number],
+  };
+  expect(fullFileFocus("scene.unity", "step", undefined, selection)).toEqual([7100, 7120]);
+  expect(fullFileFocus("scene.unity", "step", 7000, selection)).toEqual([7000, 7000]);
+  expect(fullFileFocus("other.unity", "step", undefined, selection)).toBeUndefined();
+  expect(fullFileFocus("scene.unity", "base", undefined, selection)).toBeUndefined();
+  const result = fullFileFocus("scene.unity", "step", undefined, selection)!;
+  result[0] = 1;
+  expect(selection.focus).toEqual([7100, 7120]);
+});
 
 test("a reference tab retains its version, highlight and scroll through the change overview", () => {
   const memory = new ReadingMemory();

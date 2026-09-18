@@ -1,3 +1,5 @@
+import type { DiffLine } from "../../skills/code-walkthrough/scripts/diff";
+export { compareLines, diffLines, type DiffLine } from "../../skills/code-walkthrough/scripts/diff";
 import type {
   Change,
   FileInfo,
@@ -204,13 +206,6 @@ export function makeLocation(
   return `#${params}`;
 }
 
-export interface DiffLine {
-  kind: "same" | "add" | "remove";
-  text: string;
-  old?: number;
-  next?: number;
-}
-
 export interface DiffRegion {
   /** Zero-based, inclusive bounds into the complete diff row list. */
   start: number;
@@ -290,117 +285,6 @@ export function focusScrollTop(
   }
 
   return Math.max(0, targetBottom - viewportHeight + context);
-}
-
-// A longest common subsequence (LCS) gives stable line diffs for teaching patches
-// without a runtime dependency. The cell budget bounds its quadratic work; the
-// caller can still show the full file when an inline comparison is too large.
-export function diffLines(before: string, after: string): DiffLine[] {
-  const beforeLines = normalize(before).replace(/\n$/, "").split("\n");
-  const afterLines = normalize(after).replace(/\n$/, "").split("\n");
-  if (!before) {
-    beforeLines.length = 0;
-  }
-  if (!after) {
-    afterLines.length = 0;
-  }
-  // Most edits touch a small portion of a large source file. Trim matching
-  // endpoints before allocating the quadratic table, preserving line numbers
-  // against the original inputs when the diff is reconstructed below.
-  let prefixLength = 0;
-  while (
-    prefixLength < beforeLines.length &&
-    prefixLength < afterLines.length &&
-    beforeLines[prefixLength] === afterLines[prefixLength]
-  ) {
-    prefixLength++;
-  }
-
-  let beforeEnd = beforeLines.length;
-  let afterEnd = afterLines.length;
-  while (
-    beforeEnd > prefixLength &&
-    afterEnd > prefixLength &&
-    beforeLines[beforeEnd - 1] === afterLines[afterEnd - 1]
-  ) {
-    beforeEnd--;
-    afterEnd--;
-  }
-
-  const beforeLength = beforeEnd - prefixLength;
-  const afterLength = afterEnd - prefixLength;
-  if (beforeLength * afterLength > 3_000_000) {
-    throw new RangeError(
-      "This diff is too large for an inline comparison. Use Full file to read either version.",
-    );
-  }
-
-  // Each cell holds the LCS length for the two suffixes starting at its indices.
-  // The extra row and column represent empty suffixes and stay zero.
-  const width = afterLength + 1;
-  const table = new Uint32Array((beforeLength + 1) * width);
-  for (let beforeIndex = beforeLength - 1; beforeIndex >= 0; beforeIndex--) {
-    for (let afterIndex = afterLength - 1; afterIndex >= 0; afterIndex--) {
-      const cell = beforeIndex * width + afterIndex;
-      if (beforeLines[prefixLength + beforeIndex] === afterLines[prefixLength + afterIndex]) {
-        table[cell] = table[(beforeIndex + 1) * width + afterIndex + 1] + 1;
-      } else {
-        const skipBefore = table[(beforeIndex + 1) * width + afterIndex];
-        const skipAfter = table[beforeIndex * width + afterIndex + 1];
-        table[cell] = Math.max(skipBefore, skipAfter);
-      }
-    }
-  }
-
-  const result: DiffLine[] = [];
-  for (let index = 0; index < prefixLength; index++) {
-    result.push({ kind: "same", text: beforeLines[index], old: index + 1, next: index + 1 });
-  }
-
-  let beforeIndex = prefixLength;
-  let afterIndex = prefixLength;
-
-  while (beforeIndex < beforeEnd || afterIndex < afterEnd) {
-    const hasBefore = beforeIndex < beforeEnd;
-    const hasAfter = afterIndex < afterEnd;
-    const tableBefore = beforeIndex - prefixLength;
-    const tableAfter = afterIndex - prefixLength;
-
-    if (hasBefore && hasAfter && beforeLines[beforeIndex] === afterLines[afterIndex]) {
-      result.push({
-        kind: "same",
-        text: beforeLines[beforeIndex],
-        old: beforeIndex + 1,
-        next: afterIndex + 1,
-      });
-      beforeIndex++;
-      afterIndex++;
-    } else if (
-      hasAfter &&
-      (!hasBefore ||
-        table[tableBefore * width + tableAfter + 1] > table[(tableBefore + 1) * width + tableAfter])
-    ) {
-      result.push({ kind: "add", text: afterLines[afterIndex], next: afterIndex + 1 });
-      afterIndex++;
-    } else {
-      // On equal LCS lengths, remove first to keep replacement ordering stable.
-      result.push({ kind: "remove", text: beforeLines[beforeIndex], old: beforeIndex + 1 });
-      beforeIndex++;
-    }
-  }
-
-  while (beforeIndex < beforeLines.length) {
-    result.push({
-      kind: "same",
-      text: beforeLines[beforeIndex],
-      old: beforeIndex + 1,
-      next: afterIndex + 1,
-    });
-    beforeIndex++;
-    afterIndex++;
-  }
-
-  return result;
 }
 
 export function defaultSelection(step: Step): {

@@ -227,13 +227,6 @@ test("small changes in large files stay within the diff budget", () => {
   expect(diffLines(beforeLines.join("\n"), beforeLines.join("\n"))).toHaveLength(5_000);
 });
 
-test("large unrelated middles retain a clear bounded-work failure", () => {
-  const before = Array.from({ length: 2_000 }, (_, index) => `before ${index}`).join("\n");
-  const after = Array.from({ length: 2_000 }, (_, index) => `after ${index}`).join("\n");
-  expect(() => diffLines(before, after)).toThrow(RangeError);
-  expect(() => diffLines(before, after)).toThrow("Use Full file");
-});
-
 test("diff reconstruction retains content and numbering through repeated lines", () => {
   const sources = ["", "a", "b", "a\na", "a\nb", "b\na", "a\nb\na", "b\na\nb", "\na\n"];
 

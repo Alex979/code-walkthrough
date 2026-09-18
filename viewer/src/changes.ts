@@ -1,5 +1,6 @@
 import type { SourceLink } from "../../skills/code-walkthrough/scripts/types";
-import { diffLines, diffRegions, normalize, resolveFocus, type DiffRegion } from "./model";
+import { compareLines } from "../../skills/code-walkthrough/scripts/diff";
+import { diffRegions, normalize, resolveFocus, type DiffRegion } from "./model";
 
 export interface SourceState {
   exists: boolean;
@@ -14,6 +15,7 @@ export interface FileChange {
   kind: "added" | "modified" | "deleted";
   regions: DiffRegion[];
   notice?: string;
+  coarse?: boolean;
   failed: boolean;
 }
 
@@ -91,7 +93,11 @@ async function prepareFileChange(
         }
       }
     }
-    const rows = diffLines(previousText, currentText);
+    const comparison = compareLines(previousText, currentText);
+    const rows = comparison.rows;
+    if (comparison.coarse) {
+      change.coarse = true;
+    }
     const currentLines = normalize(currentText).split("\n");
     const finalLine = currentLines.length;
     if (
@@ -110,10 +116,9 @@ async function prepareFileChange(
       change.notice = "No visible line differences. File bytes or metadata may have changed.";
     }
   } catch (error) {
-    if (!(error instanceof RangeError)) {
-      throw error;
-    }
-    change.notice = error.message;
+    const message = error instanceof Error ? error.message : String(error);
+    change.notice = `Could not compare this file's changes: ${message}`;
+    change.failed = true;
   }
 
   return change;

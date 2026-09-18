@@ -90,6 +90,78 @@ function opaque(kind: "binary" | "large" | "unavailable", digit = "a", mode = "1
   return { oid: digit.repeat(40), size: 42, kind, mode };
 }
 
+describe("presentation preflight", () => {
+  test("prepares scattered changes in a large cumulative file and excludes opaque assets", async () => {
+    const f = await fixture();
+    const lines = Array.from({ length: 8000 }, (_, index) => `entry ${index}: original`);
+    const middle = [...lines];
+    middle[20] = "entry 20: updated";
+    middle[7900] = "entry 7900: updated";
+    const final = [...middle];
+    final[4000] = "entry 4000: updated later";
+    await f.file("scene.txt", lines.join("\n"), final.join("\n"));
+    await f.file("model.bin", undefined, opaque("binary"));
+    await f.file("removed.txt", "old content\n", undefined);
+    f.lesson.steps = [
+      step({
+        id: "spread",
+        changes: {
+          "main.ts": { use: "head" },
+          "scene.txt": { text: middle.join("\n") },
+          "model.bin": { use: "head" },
+          "removed.txt": null,
+        },
+        paragraphs: [
+          [
+            {
+              label: "last change",
+              path: "scene.txt",
+              start: 7901,
+              view: "changes",
+              version: "step",
+            },
+          ],
+        ],
+      }),
+      step({ id: "later", changes: { "scene.txt": { use: "head" } } }),
+    ];
+    await f.save();
+    const result = await validate(f.dir, { presentation: true });
+    expect(result.presentation).toEqual({ comparisons: 4, coarse: [] });
+  });
+
+  test("identifies coarse comparisons by teaching step while preserving validation", async () => {
+    const f = await fixture();
+    const before = Array.from({ length: 2500 }, () => "common\nbefore").join("\n");
+    const after = Array.from({ length: 2500 }, () => "common\nafter").join("\n");
+    await f.file("repeated.txt", before, after);
+    f.lesson.steps[0].changes!["repeated.txt"] = { use: "head" };
+    await f.save();
+    const result = await validate(f.dir, { presentation: true });
+    expect(result.ok).toBe(true);
+    expect(result.presentation).toEqual({
+      comparisons: 2,
+      coarse: [{ step: "finish", path: "repeated.txt" }],
+    });
+  });
+
+  test("preflight still rejects an invalid pointer instead of accepting a source fallback", async () => {
+    const f = await fixture();
+    f.lesson.steps[0].paragraphs = [
+      [
+        {
+          label: "missing line",
+          path: "main.ts",
+          start: 99,
+          view: "changes",
+        },
+      ],
+    ];
+    await f.save();
+    await problems(() => validate(f.dir, { presentation: true }), "line range", "exceeds");
+  });
+});
+
 async function problems(
   run: () => Promise<unknown>,
   ...messages: string[]

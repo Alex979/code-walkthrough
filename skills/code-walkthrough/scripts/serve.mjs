@@ -155,7 +155,7 @@ Use --port 0 to select a free port. Press Ctrl+C to stop.`);
     throw new Error("Port must be between 0 and 65535 (0 selects a free port).");
   }
   const extension = import.meta.url.endsWith(".ts") ? "ts" : "mjs";
-  const validation = spawnSync(process.execPath, [resolve(scriptDirectory, `validate.${extension}`), directory], { stdio: "inherit", windowsHide: true });
+  const validation = spawnSync(process.execPath, [resolve(scriptDirectory, `validate.${extension}`), directory, "--presentation"], { stdio: "inherit", windowsHide: true });
   if (validation.error) {
     throw new Error(`Unable to start artifact validation: ${validation.error.message}`);
   }

@@ -1,6 +1,41 @@
 import type { Version } from "../../skills/code-walkthrough/scripts/types";
 import type { DisplayMode } from "./model";
 
+/** A partial selection is misleading: every requested current-source line must
+ * be present before a compact comparison can claim to show the target. */
+export function isFocusRendered(
+  focus: [number, number] | undefined,
+  renderedLines: Iterable<number>,
+): boolean {
+  if (!focus) {
+    return true;
+  }
+  const lines = new Set(renderedLines);
+  for (let line = focus[0]; line <= focus[1]; line++) {
+    if (!lines.has(line)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Prefer the region the reader is viewing. If it has no rendered rows, keep
+ * the requested source range instead of silently sending them to line one. */
+export function fullFileFocus(
+  filePath: string,
+  targetVersion: Version,
+  visibleLine: number | undefined,
+  selection: { path: string; version: Version; focus?: [number, number] },
+): [number, number] | undefined {
+  if (visibleLine !== undefined) {
+    return [visibleLine, visibleLine];
+  }
+  if (filePath === selection.path && targetVersion === selection.version && selection.focus) {
+    return [...selection.focus];
+  }
+  return undefined;
+}
+
 export interface ReadingPosition {
   path: string;
   version: Version;

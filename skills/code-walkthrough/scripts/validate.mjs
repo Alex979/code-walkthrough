@@ -3,6 +3,185 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 
+// skills/code-walkthrough/scripts/diff.ts
+var LCS_CELL_BUDGET = 3000000;
+function sourceLines(source) {
+  if (!source) {
+    return [];
+  }
+  return source.replaceAll(`\r
+`, `
+`).replace(/\n$/, "").split(`
+`);
+}
+function uniquePositions(lines, start, end) {
+  const positions = new Map;
+  for (let index = start;index < end; index++) {
+    const text = lines[index];
+    positions.set(text, positions.has(text) ? -1 : index);
+  }
+  return positions;
+}
+function patienceAnchors(before, after, span) {
+  const beforePositions = uniquePositions(before, span.beforeStart, span.beforeEnd);
+  const afterPositions = uniquePositions(after, span.afterStart, span.afterEnd);
+  const candidates = [];
+  for (const [text, beforeIndex] of beforePositions) {
+    const afterIndex = afterPositions.get(text);
+    if (beforeIndex >= 0 && afterIndex !== undefined && afterIndex >= 0) {
+      candidates.push({ before: beforeIndex, after: afterIndex });
+    }
+  }
+  const tails = [];
+  const predecessors = new Int32Array(candidates.length).fill(-1);
+  for (let index2 = 0;index2 < candidates.length; index2++) {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = low + high >>> 1;
+      if (candidates[tails[middle]].after < candidates[index2].after) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    if (low > 0) {
+      predecessors[index2] = tails[low - 1];
+    }
+    tails[low] = index2;
+  }
+  const anchors = [];
+  let index = tails.at(-1) ?? -1;
+  while (index >= 0) {
+    anchors.push(candidates[index]);
+    index = predecessors[index];
+  }
+  return anchors.reverse();
+}
+function appendExactDiff(before, after, span, rows) {
+  const beforeLength = span.beforeEnd - span.beforeStart;
+  const afterLength = span.afterEnd - span.afterStart;
+  const width = afterLength + 1;
+  const table = new Uint32Array((beforeLength + 1) * width);
+  for (let old2 = beforeLength - 1;old2 >= 0; old2--) {
+    for (let next2 = afterLength - 1;next2 >= 0; next2--) {
+      const cell = old2 * width + next2;
+      if (before[span.beforeStart + old2] === after[span.afterStart + next2]) {
+        table[cell] = table[(old2 + 1) * width + next2 + 1] + 1;
+      } else {
+        table[cell] = Math.max(table[(old2 + 1) * width + next2], table[cell + 1]);
+      }
+    }
+  }
+  let old = span.beforeStart;
+  let next = span.afterStart;
+  while (old < span.beforeEnd || next < span.afterEnd) {
+    const hasBefore = old < span.beforeEnd;
+    const hasAfter = next < span.afterEnd;
+    const cell = (old - span.beforeStart) * width + next - span.afterStart;
+    if (hasBefore && hasAfter && before[old] === after[next]) {
+      rows.push({ kind: "same", text: before[old], old: old + 1, next: next + 1 });
+      old++;
+      next++;
+    } else if (hasAfter && (!hasBefore || table[cell + 1] > table[cell + width])) {
+      rows.push({ kind: "add", text: after[next], next: next + 1 });
+      next++;
+    } else {
+      rows.push({ kind: "remove", text: before[old], old: old + 1 });
+      old++;
+    }
+  }
+}
+function compareLines(before, after) {
+  const beforeLines = sourceLines(before);
+  const afterLines = sourceLines(after);
+  const rows = [];
+  const pending = [
+    {
+      beforeStart: 0,
+      beforeEnd: beforeLines.length,
+      afterStart: 0,
+      afterEnd: afterLines.length
+    }
+  ];
+  let remainingCells = LCS_CELL_BUDGET;
+  let remainingScans = (beforeLines.length + afterLines.length) * 8;
+  let coarse = false;
+  while (pending.length > 0) {
+    const span = pending.pop();
+    while (span.beforeStart < span.beforeEnd && span.afterStart < span.afterEnd && beforeLines[span.beforeStart] === afterLines[span.afterStart]) {
+      rows.push({
+        kind: "same",
+        text: beforeLines[span.beforeStart],
+        old: span.beforeStart + 1,
+        next: span.afterStart + 1
+      });
+      span.beforeStart++;
+      span.afterStart++;
+    }
+    const beforeEnd = span.beforeEnd;
+    const afterEnd = span.afterEnd;
+    while (span.beforeEnd > span.beforeStart && span.afterEnd > span.afterStart && beforeLines[span.beforeEnd - 1] === afterLines[span.afterEnd - 1]) {
+      span.beforeEnd--;
+      span.afterEnd--;
+    }
+    if (span.beforeEnd < beforeEnd) {
+      pending.push({
+        beforeStart: span.beforeEnd,
+        beforeEnd,
+        afterStart: span.afterEnd,
+        afterEnd
+      });
+    }
+    const beforeLength = span.beforeEnd - span.beforeStart;
+    const afterLength = span.afterEnd - span.afterStart;
+    const cells = (beforeLength + 1) * (afterLength + 1);
+    if (beforeLength > 0 && afterLength > 0 && cells <= remainingCells) {
+      remainingCells -= cells;
+      appendExactDiff(beforeLines, afterLines, span, rows);
+      continue;
+    }
+    if (beforeLength > 0 && afterLength > 0) {
+      const scanSize = beforeLength + afterLength;
+      if (scanSize <= remainingScans) {
+        remainingScans -= scanSize;
+        const anchors = patienceAnchors(beforeLines, afterLines, span);
+        if (anchors.length > 0) {
+          let oldEnd = span.beforeEnd;
+          let nextEnd = span.afterEnd;
+          for (let index = anchors.length - 1;index >= 0; index--) {
+            const anchor = anchors[index];
+            pending.push({
+              beforeStart: anchor.before + 1,
+              beforeEnd: oldEnd,
+              afterStart: anchor.after + 1,
+              afterEnd: nextEnd
+            });
+            pending.push({
+              beforeStart: anchor.before,
+              beforeEnd: anchor.before + 1,
+              afterStart: anchor.after,
+              afterEnd: anchor.after + 1
+            });
+            oldEnd = anchor.before;
+            nextEnd = anchor.after;
+          }
+          pending.push({ ...span, beforeEnd: oldEnd, afterEnd: nextEnd });
+          continue;
+        }
+      }
+      coarse = true;
+    }
+    for (let index = span.beforeStart;index < span.beforeEnd; index++) {
+      rows.push({ kind: "remove", text: beforeLines[index], old: index + 1 });
+    }
+    for (let index = span.afterStart;index < span.afterEnd; index++) {
+      rows.push({ kind: "add", text: afterLines[index], next: index + 1 });
+    }
+  }
+  return { rows, coarse };
+}
+
 // skills/code-walkthrough/scripts/runtime.ts
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -418,7 +597,7 @@ function validateFinalState(manifest, current, head, errors) {
     }
   }
 }
-async function validate(dir) {
+async function validate(dir, options = {}) {
   const errors = new Problems;
   if (!isNonemptyString(dir)) {
     throw new ValidationError(["artifact directory: expected a nonempty path string."]);
@@ -446,6 +625,7 @@ async function validate(dir) {
   const files = new Map(manifest.files.map((file) => [file.path, file]));
   const { base, head, textBlobs } = await loadSnapshots(root, manifest, errors);
   const current = new Map(base);
+  const presentation = options.presentation ? { comparisons: 0, coarse: [] } : undefined;
   function validateSelection(path, selected, at, range, symbol, count) {
     if (!files.has(path)) {
       errors.add(`${at}: unknown manifest path ${JSON.stringify(path)}.`);
@@ -533,6 +713,7 @@ async function validate(dir) {
   }
   for (const [index, step] of lesson.steps.entries()) {
     const at = `step ${JSON.stringify(step.id)} [${index}]`;
+    const previous = presentation ? new Map(current) : undefined;
     applyChanges(step, at);
     if (step.file !== undefined) {
       validateSelection(step.file, step.version, `${at}.file`, step.focus, step.symbol, step.count);
@@ -546,22 +727,54 @@ async function validate(dir) {
         validateSelection(link.path, link.version, `${at}.paragraphs[${paragraphIndex}][${partIndex}] (${JSON.stringify(link.label)})`, link.start === undefined ? undefined : [link.start, link.end ?? link.start], link.symbol, link.count);
       }
     }
+    if (presentation && previous && !errors.items.length) {
+      for (const path of Object.keys(step.changes ?? {})) {
+        const before = previous.get(path);
+        const after = current.get(path);
+        if (before && before.info.kind !== "text" || after && after.info.kind !== "text") {
+          continue;
+        }
+        try {
+          const comparison = compareLines(before?.text ?? "", after?.text ?? "");
+          presentation.comparisons++;
+          if (comparison.coarse) {
+            presentation.coarse.push({ step: step.id, path });
+          }
+        } catch (error) {
+          errors.add(`${at}.changes[${JSON.stringify(path)}]: viewer comparison could not be prepared: ${errorText(error)}`);
+        }
+      }
+    }
   }
   validateFinalState(manifest, current, head, errors);
   errors.throwIfAny();
-  return { ok: true, files: files.size, steps: lesson.steps.length, textBlobs };
+  return {
+    ok: true,
+    files: files.size,
+    steps: lesson.steps.length,
+    textBlobs,
+    ...presentation ? { presentation } : {}
+  };
 }
 if (isMainModule(import.meta.url)) {
   try {
     requireSupportedRuntime();
-    if (process.argv.length === 3 && process.argv[2] === "--help") {
-      console.log("Usage: node scripts/validate.mjs ARTIFACT_DIR");
-    } else if (process.argv.length !== 3) {
-      console.error("Usage: node scripts/validate.mjs ARTIFACT_DIR");
+    const args = process.argv.slice(2);
+    const usage = "Usage: node scripts/validate.mjs ARTIFACT_DIR [--presentation]";
+    if (args.length === 1 && args[0] === "--help") {
+      console.log(usage);
+    } else if (!args[0] || args[0].startsWith("--") || !(args.length === 1 || args.length === 2 && args[1] === "--presentation")) {
+      console.error(usage);
       process.exitCode = 2;
     } else {
-      const result = await validate(process.argv[2]);
+      const result = await validate(args[0], { presentation: args[1] === "--presentation" });
       console.log(`Valid artifact: ${result.files} files, ${result.steps} steps, ${result.textBlobs} text blobs.`);
+      if (result.presentation) {
+        console.log(`Presentation checked: ${result.presentation.comparisons} text comparisons; ${result.presentation.coarse.length} coarse comparisons.`);
+        for (const item of result.presentation.coarse) {
+          console.warn(`Review step ${JSON.stringify(item.step)}, ${JSON.stringify(item.path)}: the viewer preserves all lines but uses coarse replacement blocks. Check whether the explanation remains easy to follow.`);
+        }
+      }
     }
   } catch (error) {
     console.error(error instanceof ValidationError ? error.message : `Validation failed: ${errorText(error)}`);
