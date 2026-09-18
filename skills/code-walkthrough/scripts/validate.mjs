@@ -1,45 +1,37 @@
+// skills/code-walkthrough/scripts/validate.ts
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
-import { isMainModule, requireSupportedRuntime } from "./runtime";
-import type { BlobInfo, Lesson, Manifest, SourceLink, Version } from "./types";
 
-/**
- * await validate(artifactDir) -> { ok: true, files, steps, textBlobs }.
- * Failure throws ValidationError; .problems contains up to 50 actionable messages
- * and .omitted counts further problems. This checks identity, not compilation.
- *
- * Snapshots are exact UTF-8 bytes: CRLF, trailing newlines and BOM are preserved.
- * Text changes replace full source and preserve the current mode (or the captured
- * base mode, then head mode, when introducing a file). use:"head" adopts all head
- * metadata. A text change requires at least one captured textual side; it cannot
- * produce a non-text head. Binary/large/unavailable versions allow an unanchored
- * file selection, but cannot supply source lines or symbols.
- *
- * Changes apply before that step's selections/links and accumulate from base.
- * A step may omit its reading target; its anchors and version then must be omitted
- * too. Selections default to version:"step". Lines are 1-based, split on LF (including
- * a final empty line). Symbols are literal substrings matching exactly one line;
- * count is the number of lines starting there (default 1). They are not parsed
- * language symbols. File links resolve their own version independently. Links
- * with view:"changes" require an anchor in a path changed by this step and can
- * only select its cumulative source. Their range may include unchanged context.
- */
-export interface ValidationResult {
-  ok: true;
-  files: number;
-  steps: number;
-  textBlobs: number;
+// skills/code-walkthrough/scripts/runtime.ts
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+function isMainModule(moduleUrl, entryPath = process.argv[1]) {
+  if (!entryPath) {
+    return false;
+  }
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(entryPath);
+  } catch {
+    return false;
+  }
+}
+function requireSupportedRuntime(version = process.versions.node) {
+  const major = Number(version.split(".")[0]);
+  if (!Number.isInteger(major) || major < 22) {
+    throw new Error(`Node.js 22 or newer is required (found ${version}). Install a supported Node.js LTS release from https://nodejs.org/ and retry. No npm install is needed.`);
+  }
 }
 
-export class ValidationError extends Error {
-  readonly problems: string[];
-  readonly omitted: number;
-
-  constructor(problems: string[], omitted = 0) {
-    super(
-      `Artifact validation failed:\n${problems.map((problem) => `- ${problem}`).join("\n")}${omitted ? `\n- ${omitted} further problem(s) omitted.` : ""}`,
-    );
+// skills/code-walkthrough/scripts/validate.ts
+class ValidationError extends Error {
+  problems;
+  omitted;
+  constructor(problems, omitted = 0) {
+    super(`Artifact validation failed:
+${problems.map((problem) => `- ${problem}`).join(`
+`)}${omitted ? `
+- ${omitted} further problem(s) omitted.` : ""}`);
     this.name = "ValidationError";
     this.problems = [...problems];
     this.omitted = omitted;
@@ -47,82 +39,62 @@ export class ValidationError extends Error {
 }
 
 class Problems {
-  items: string[] = [];
+  items = [];
   omitted = 0;
-
-  add(message: string): void {
+  add(message) {
     if (this.items.length < 50) {
       this.items.push(message.length > 600 ? `${message.slice(0, 597)}...` : message);
     } else {
       this.omitted++;
     }
   }
-
-  throwIfAny(): void {
+  throwIfAny() {
     if (this.items.length) {
       throw new ValidationError(this.items, this.omitted);
     }
   }
 }
-
-type ObjectValue = Record<string, unknown>;
-
-function isObject(value: unknown): value is ObjectValue {
+function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-
-function isNonemptyString(value: unknown): value is string {
+function isNonemptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
-
-function isPositiveInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) > 0;
+function isPositiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0;
 }
-
-function isSafePath(value: unknown): value is string {
-  return (
-    isNonemptyString(value) &&
-    !/[\\:\x00-\x1f\x7f]/.test(value) &&
-    value.split("/").every((part) => part !== "" && part !== "." && part !== "..")
-  );
+function isSafePath(value) {
+  return isNonemptyString(value) && !/[\\:\x00-\x1f\x7f]/.test(value) && value.split("/").every((part) => part !== "" && part !== "." && part !== "..");
 }
-
-function validateKeys(value: ObjectValue, allowed: string[], at: string, errors: Problems): void {
+function validateKeys(value, allowed, at, errors) {
   for (const key of Object.keys(value)) {
     if (!allowed.includes(key)) {
       errors.add(`${at}: unknown key ${JSON.stringify(key)}; allowed: ${allowed.join(", ")}.`);
     }
   }
 }
-
-function validateRequiredText(value: unknown, at: string, errors: Problems): void {
+function validateRequiredText(value, at, errors) {
   if (!isNonemptyString(value)) {
     errors.add(`${at}: expected a nonempty string.`);
   }
 }
-
-function validatePathField(value: unknown, at: string, errors: Problems): void {
+function validatePathField(value, at, errors) {
   if (!isSafePath(value)) {
-    errors.add(
-      `${at}: expected a relative slash-separated path without empty, dot, parent, drive or control segments.`,
-    );
+    errors.add(`${at}: expected a relative slash-separated path without empty, dot, parent, drive or control segments.`);
   }
 }
-
-function validateVersion(value: ObjectValue, at: string, errors: Problems): void {
-  if ("version" in value && !["base", "step", "head"].includes(value.version as string)) {
+function validateVersion(value, at, errors) {
+  if ("version" in value && !["base", "step", "head"].includes(value.version)) {
     errors.add(`${at}.version: expected "base", "step" or "head".`);
   }
 }
-
-function validateAnchor(value: ObjectValue, at: string, isStep: boolean, errors: Problems): void {
+function validateAnchor(value, at, isStep, errors) {
   if ("symbol" in value) {
     validateRequiredText(value.symbol, `${at}.symbol`, errors);
     if (typeof value.symbol === "string" && /[\r\n]/.test(value.symbol)) {
       errors.add(`${at}.symbol: must fit on one source line.`);
     }
   }
-
   if ("count" in value) {
     if (!isPositiveInteger(value.count)) {
       errors.add(`${at}.count: expected a positive safe integer.`);
@@ -131,19 +103,11 @@ function validateAnchor(value: ObjectValue, at: string, isStep: boolean, errors:
       errors.add(`${at}.count: requires symbol.`);
     }
   }
-
   if (isStep) {
     if ("focus" in value) {
       const focus = value.focus;
-      if (
-        !Array.isArray(focus) ||
-        focus.length !== 2 ||
-        !focus.every(isPositiveInteger) ||
-        focus[1] < focus[0]
-      ) {
-        errors.add(
-          `${at}.focus: expected [start, end] with positive 1-based integers and end >= start.`,
-        );
+      if (!Array.isArray(focus) || focus.length !== 2 || !focus.every(isPositiveInteger) || focus[1] < focus[0]) {
+        errors.add(`${at}.focus: expected [start, end] with positive 1-based integers and end >= start.`);
       }
       if ("symbol" in value) {
         errors.add(`${at}: choose either focus or symbol/count, not both.`);
@@ -161,50 +125,37 @@ function validateAnchor(value: ObjectValue, at: string, isStep: boolean, errors:
     if (isPositiveInteger(value.start) && isPositiveInteger(value.end) && value.end < value.start) {
       errors.add(`${at}.end: must be >= start.`);
     }
-    if ("symbol" in value && ("start" in value || "end" in value)) {
+    if ("symbol" in value && (("start" in value) || ("end" in value))) {
       errors.add(`${at}: choose either start/end or symbol/count, not both.`);
     }
   }
-
   validateVersion(value, at, errors);
 }
-
-function validateBlobShape(value: unknown, at: string, errors: Problems): void {
+function validateBlobShape(value, at, errors) {
   if (!isObject(value)) {
     errors.add(`${at}: expected a BlobInfo object.`);
     return;
   }
   validateKeys(value, ["oid", "size", "kind", "mode"], at, errors);
-  if (
-    !(value.kind === "unavailable" && value.oid === "") &&
-    (typeof value.oid !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.oid))
-  ) {
-    errors.add(
-      `${at}.oid: expected a lowercase 40-character SHA-1 or 64-character SHA-256 Git blob ID (or empty for unavailable content).`,
-    );
+  if (!(value.kind === "unavailable" && value.oid === "") && (typeof value.oid !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.oid))) {
+    errors.add(`${at}.oid: expected a lowercase 40-character SHA-1 or 64-character SHA-256 Git blob ID (or empty for unavailable content).`);
   }
-  if (!Number.isSafeInteger(value.size) || (value.size as number) < 0) {
+  if (!Number.isSafeInteger(value.size) || value.size < 0) {
     errors.add(`${at}.size: expected a nonnegative safe integer byte length.`);
   }
-  if (!["text", "binary", "large", "unavailable"].includes(value.kind as string)) {
+  if (!["text", "binary", "large", "unavailable"].includes(value.kind)) {
     errors.add(`${at}.kind: expected text, binary, large or unavailable.`);
   }
   if ("mode" in value && (typeof value.mode !== "string" || !/^[0-7]{6}$/.test(value.mode))) {
     errors.add(`${at}.mode: expected six octal digits, e.g. "100644".`);
   }
 }
-
-function validateManifestShape(value: unknown, errors: Problems): void {
+function validateManifestShape(value, errors) {
   if (!isObject(value)) {
     errors.add("manifest.json: expected an object.");
     return;
   }
-  validateKeys(
-    value,
-    ["schemaVersion", "repo", "base", "head", "title", "sourceUrl", "scope", "files"],
-    "manifest.json",
-    errors,
-  );
+  validateKeys(value, ["schemaVersion", "repo", "base", "head", "title", "sourceUrl", "scope", "files"], "manifest.json", errors);
   if (value.schemaVersion !== 1) {
     errors.add("manifest.schemaVersion: expected 1.");
   }
@@ -232,8 +183,8 @@ function validateManifestShape(value: unknown, errors: Problems): void {
     errors.add("manifest.files: expected an array.");
     return;
   }
-  const seen = new Set<string>();
-  value.files.forEach((file: unknown, index: number) => {
+  const seen = new Set;
+  value.files.forEach((file, index) => {
     const at = `manifest.files[${index}]`;
     if (!isObject(file)) {
       errors.add(`${at}: expected a FileInfo object.`);
@@ -255,21 +206,14 @@ function validateManifestShape(value: unknown, errors: Problems): void {
     if (!("base" in file) && !("head" in file)) {
       errors.add(`${at}: requires a base or head snapshot.`);
     }
-    if (!["A", "M", "D", ""].includes(file.status as string)) {
+    if (!["A", "M", "D", ""].includes(file.status)) {
       errors.add(`${at}.status: expected "A", "M", "D" or "".`);
-    } else if (
-      (file.status === "A" && ("base" in file || !("head" in file))) ||
-      (file.status === "D" && (!("base" in file) || "head" in file)) ||
-      ((file.status === "M" || file.status === "") && (!("base" in file) || !("head" in file)))
-    ) {
-      errors.add(
-        `${at}.status: inconsistent with base/head presence (A: head only, D: base only, M/empty: both).`,
-      );
+    } else if (file.status === "A" && (("base" in file) || !("head" in file)) || file.status === "D" && (!("base" in file) || ("head" in file)) || (file.status === "M" || file.status === "") && (!("base" in file) || !("head" in file))) {
+      errors.add(`${at}.status: inconsistent with base/head presence (A: head only, D: base only, M/empty: both).`);
     }
   });
 }
-
-function validateLessonShape(value: unknown, errors: Problems): void {
+function validateLessonShape(value, errors) {
   if (!isObject(value)) {
     errors.add("lesson.json: expected an object.");
     return;
@@ -283,19 +227,14 @@ function validateLessonShape(value: unknown, errors: Problems): void {
     errors.add("lesson.steps: expected a nonempty array.");
     return;
   }
-  const ids = new Set<string>();
-  value.steps.forEach((step: unknown, index: number) => {
+  const ids = new Set;
+  value.steps.forEach((step, index) => {
     const at = `lesson.steps[${index}]`;
     if (!isObject(step)) {
       errors.add(`${at}: expected a Step object.`);
       return;
     }
-    validateKeys(
-      step,
-      ["id", "title", "paragraphs", "file", "focus", "symbol", "count", "version", "changes"],
-      at,
-      errors,
-    );
+    validateKeys(step, ["id", "title", "paragraphs", "file", "focus", "symbol", "count", "version", "changes"], at, errors);
     validateRequiredText(step.id, `${at}.id`, errors);
     validateRequiredText(step.title, `${at}.title`, errors);
     if ("file" in step) {
@@ -303,9 +242,7 @@ function validateLessonShape(value: unknown, errors: Problems): void {
     } else {
       for (const field of ["focus", "symbol", "count", "version"]) {
         if (field in step) {
-          errors.add(
-            `${at}.${field}: requires file; omit target fields for a step without a reading target.`,
-          );
+          errors.add(`${at}.${field}: requires file; omit target fields for a step without a reading target.`);
         }
       }
     }
@@ -319,7 +256,7 @@ function validateLessonShape(value: unknown, errors: Problems): void {
     if (!Array.isArray(step.paragraphs) || step.paragraphs.length === 0) {
       errors.add(`${at}.paragraphs: expected a nonempty array of paragraphs.`);
     } else {
-      step.paragraphs.forEach((paragraph: unknown, paragraphIndex: number) => {
+      step.paragraphs.forEach((paragraph, paragraphIndex) => {
         const here = `${at}.paragraphs[${paragraphIndex}]`;
         if (!Array.isArray(paragraph) || paragraph.length === 0) {
           errors.add(`${here}: expected a nonempty array of strings/source links.`);
@@ -328,7 +265,7 @@ function validateLessonShape(value: unknown, errors: Problems): void {
         if (paragraph.every((part) => typeof part === "string" && !part.trim())) {
           errors.add(`${here}: paragraph must contain text or a source link.`);
         }
-        paragraph.forEach((part: unknown, partIndex: number) => {
+        paragraph.forEach((part, partIndex) => {
           if (typeof part === "string") {
             return;
           }
@@ -337,32 +274,21 @@ function validateLessonShape(value: unknown, errors: Problems): void {
             errors.add(`${linkAt}: expected a string or SourceLink object.`);
             return;
           }
-          validateKeys(
-            part,
-            ["label", "path", "view", "start", "end", "symbol", "count", "version"],
-            linkAt,
-            errors,
-          );
+          validateKeys(part, ["label", "path", "view", "start", "end", "symbol", "count", "version"], linkAt, errors);
           validateRequiredText(part.label, `${linkAt}.label`, errors);
           validatePathField(part.path, `${linkAt}.path`, errors);
           validateAnchor(part, linkAt, false, errors);
-          if ("view" in part && !["file", "changes"].includes(part.view as string)) {
+          if ("view" in part && !["file", "changes"].includes(part.view)) {
             errors.add(`${linkAt}.view: expected "file" or "changes".`);
           }
           if (part.view === "changes") {
             if ("version" in part && part.version !== "step") {
-              errors.add(
-                `${linkAt}.version: view:"changes" requires "step" or an omitted version.`,
-              );
+              errors.add(`${linkAt}.version: view:"changes" requires "step" or an omitted version.`);
             }
             if (!("start" in part) && !("symbol" in part)) {
               errors.add(`${linkAt}: view:"changes" requires a start/end or symbol/count anchor.`);
             }
-            if (
-              !isObject(step.changes) ||
-              typeof part.path !== "string" ||
-              !Object.hasOwn(step.changes, part.path)
-            ) {
+            if (!isObject(step.changes) || typeof part.path !== "string" || !Object.hasOwn(step.changes, part.path)) {
               errors.add(`${linkAt}.path: view:"changes" requires a path in this step's changes.`);
             }
           }
@@ -384,10 +310,7 @@ function validateLessonShape(value: unknown, errors: Problems): void {
             continue;
           }
           validateKeys(change, ["text", "use"], changeAt, errors);
-          if (
-            Object.keys(change).length !== 1 ||
-            !(typeof change.text === "string" || change.use === "head")
-          ) {
+          if (Object.keys(change).length !== 1 || !(typeof change.text === "string" || change.use === "head")) {
             errors.add(`${changeAt}: expected exactly {text: string} or {use: "head"}.`);
           }
         }
@@ -395,51 +318,31 @@ function validateLessonShape(value: unknown, errors: Problems): void {
     }
   });
 }
-
-async function readRegularFile(path: string): Promise<Buffer> {
+async function readRegularFile(path) {
   const stat = await lstat(path);
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new Error("expected a regular file, not a symlink or directory");
   }
   return readFile(path);
 }
-
-function errorText(error: unknown): string {
+function errorText(error) {
   return error instanceof Error ? error.message : String(error);
 }
-
-async function readJsonFile(dir: string, name: string, errors: Problems): Promise<unknown> {
+async function readJsonFile(dir, name, errors) {
   try {
     const bytes = await readRegularFile(join(dir, name));
     return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch (error) {
     errors.add(`${name}: cannot read valid UTF-8 JSON: ${errorText(error)}`);
-    return undefined;
+    return;
   }
 }
-
-interface Snapshot {
-  info: BlobInfo;
-  bytes?: Buffer;
-  text?: string;
-}
-
-async function loadSnapshots(
-  root: string,
-  manifest: Manifest,
-  errors: Problems,
-): Promise<{
-  base: Map<string, Snapshot>;
-  head: Map<string, Snapshot>;
-  textBlobs: number;
-}> {
-  const blobBytesByOid = new Map<string, Buffer | undefined>();
-  const blobTextByOid = new Map<string, string>();
-  const base = new Map<string, Snapshot>();
-  const head = new Map<string, Snapshot>();
-  const hasText = manifest.files.some(
-    (file) => file.base?.kind === "text" || file.head?.kind === "text",
-  );
+async function loadSnapshots(root, manifest, errors) {
+  const blobBytesByOid = new Map;
+  const blobTextByOid = new Map;
+  const base = new Map;
+  const head = new Map;
+  const hasText = manifest.files.some((file) => file.base?.kind === "text" || file.head?.kind === "text");
   let blobsSafe = true;
   if (hasText) {
     try {
@@ -453,61 +356,42 @@ async function loadSnapshots(
     }
   }
   for (const file of manifest.files) {
-    for (const side of ["base", "head"] as const) {
+    for (const side of ["base", "head"]) {
       const info = file[side];
       if (!info) {
         continue;
       }
-      const snapshot: Snapshot = { info };
+      const snapshot = { info };
       (side === "base" ? base : head).set(file.path, snapshot);
       if (info.kind !== "text" || !blobsSafe) {
         continue;
       }
       const at = `manifest ${JSON.stringify(file.path)}.${side}`;
       if (!blobBytesByOid.has(info.oid)) {
-        // Remember failed reads too: shared blobs report their read failure once,
-        // while declared byte lengths are still checked for each referencing side.
         blobBytesByOid.set(info.oid, undefined);
         try {
           const bytes = await readRegularFile(join(root, "blobs", `${info.oid}.txt`));
-          const hash = createHash(info.oid.length === 40 ? "sha1" : "sha256")
-            .update(`blob ${bytes.length}\0`)
-            .update(bytes)
-            .digest("hex");
+          const hash = createHash(info.oid.length === 40 ? "sha1" : "sha256").update(`blob ${bytes.length}\x00`).update(bytes).digest("hex");
           if (hash !== info.oid) {
-            errors.add(
-              `blobs/${info.oid}.txt: Git blob hash mismatch; actual ${hash}. Recapture the original raw bytes.`,
-            );
+            errors.add(`blobs/${info.oid}.txt: Git blob hash mismatch; actual ${hash}. Recapture the original raw bytes.`);
           }
-          // ignoreBOM:true means include the BOM in decoded source, not strip it.
           const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
           blobBytesByOid.set(info.oid, bytes);
           blobTextByOid.set(info.oid, text);
         } catch (error) {
-          errors.add(
-            `${at}, blobs/${info.oid}.txt: cannot read UTF-8 text snapshot: ${errorText(error)}`,
-          );
+          errors.add(`${at}, blobs/${info.oid}.txt: cannot read UTF-8 text snapshot: ${errorText(error)}`);
         }
       }
       snapshot.bytes = blobBytesByOid.get(info.oid);
       snapshot.text = blobTextByOid.get(info.oid);
       if (snapshot.bytes && snapshot.bytes.length !== info.size) {
-        errors.add(
-          `${at}.size: declared ${info.size} bytes, blob contains ${snapshot.bytes.length}. Recapture or correct the manifest.`,
-        );
+        errors.add(`${at}.size: declared ${info.size} bytes, blob contains ${snapshot.bytes.length}. Recapture or correct the manifest.`);
       }
     }
   }
   return { base, head, textBlobs: blobBytesByOid.size };
 }
-
-function validateFinalState(
-  manifest: Manifest,
-  current: Map<string, Snapshot>,
-  head: Map<string, Snapshot>,
-  errors: Problems,
-): void {
-  // Check the entire union, including files no step happened to mention.
+function validateFinalState(manifest, current, head, errors) {
   for (const file of manifest.files) {
     const actual = current.get(file.path);
     const expected = head.get(file.path);
@@ -519,41 +403,27 @@ function validateFinalState(
       continue;
     }
     if (!actual) {
-      errors.add(
-        `${at}: missing head file; introduce it with {use:"head"} or its full exact text.`,
-      );
+      errors.add(`${at}: missing head file; introduce it with {use:"head"} or its full exact text.`);
       continue;
     }
     if (actual.info.mode !== expected.info.mode) {
-      errors.add(
-        `${at}: mode ${actual.info.mode ?? "(unspecified)"} differs from head ${expected.info.mode ?? "(unspecified)"}; adopt {use:"head"} to capture metadata changes.`,
-      );
+      errors.add(`${at}: mode ${actual.info.mode ?? "(unspecified)"} differs from head ${expected.info.mode ?? "(unspecified)"}; adopt {use:"head"} to capture metadata changes.`);
     }
     if (expected.info.kind === "text" && actual.info.kind === "text") {
       if (actual.bytes && expected.bytes && !actual.bytes.equals(expected.bytes)) {
-        errors.add(
-          `${at}: text differs from head bytes (actual ${actual.bytes.length}, head ${expected.bytes.length} bytes). Use exact full source or {use:"head"}; CRLF, BOM and trailing newlines are significant.`,
-        );
+        errors.add(`${at}: text differs from head bytes (actual ${actual.bytes.length}, head ${expected.bytes.length} bytes). Use exact full source or {use:"head"}; CRLF, BOM and trailing newlines are significant.`);
       }
-    } else if (
-      actual.info.kind !== expected.info.kind ||
-      actual.info.oid !== expected.info.oid ||
-      actual.info.size !== expected.info.size
-    ) {
-      errors.add(
-        `${at}: snapshot kind/content differs from captured head; adopt {use:"head"} (required for non-text content).`,
-      );
+    } else if (actual.info.kind !== expected.info.kind || actual.info.oid !== expected.info.oid || actual.info.size !== expected.info.size) {
+      errors.add(`${at}: snapshot kind/content differs from captured head; adopt {use:"head"} (required for non-text content).`);
     }
   }
 }
-
-/** Validate a captured manifest, its textual blobs, and the authored cumulative lesson. */
-export async function validate(dir: string): Promise<ValidationResult> {
-  const errors = new Problems();
+async function validate(dir) {
+  const errors = new Problems;
   if (!isNonemptyString(dir)) {
     throw new ValidationError(["artifact directory: expected a nonempty path string."]);
   }
-  let root: string;
+  let root;
   try {
     root = await realpath(dir);
     if (!(await lstat(root)).isDirectory()) {
@@ -570,26 +440,13 @@ export async function validate(dir: string): Promise<ValidationResult> {
   if (rawLesson !== undefined) {
     validateLessonShape(rawLesson, errors);
   }
-  // Reject unsafe OIDs and source paths before loading blobs or applying changes.
   errors.throwIfAny();
-
-  const manifest = rawManifest as Manifest;
-  const lesson = rawLesson as Lesson;
+  const manifest = rawManifest;
+  const lesson = rawLesson;
   const files = new Map(manifest.files.map((file) => [file.path, file]));
   const { base, head, textBlobs } = await loadSnapshots(root, manifest, errors);
-
-  // Each step sees the prior step's state plus its own changes. Captured base/head
-  // remain fixed so explicit version selections never drift with the lesson.
   const current = new Map(base);
-
-  function validateSelection(
-    path: string,
-    selected: Version | undefined,
-    at: string,
-    range?: [number, number],
-    symbol?: string,
-    count?: number,
-  ): void {
+  function validateSelection(path, selected, at, range, symbol, count) {
     if (!files.has(path)) {
       errors.add(`${at}: unknown manifest path ${JSON.stringify(path)}.`);
       return;
@@ -603,55 +460,40 @@ export async function validate(dir: string): Promise<ValidationResult> {
     }
     const snapshot = selectedSnapshots.get(path);
     if (!snapshot) {
-      errors.add(
-        `${at}: ${JSON.stringify(path)} does not exist in selected version "${selectedVersion}". Introduce it earlier or select an existing version.`,
-      );
+      errors.add(`${at}: ${JSON.stringify(path)} does not exist in selected version "${selectedVersion}". Introduce it earlier or select an existing version.`);
       return;
     }
-    // An opaque snapshot can be selected as a file, but cannot provide anchors.
     if (!range && symbol === undefined) {
       return;
     }
     if (snapshot.info.kind !== "text") {
-      errors.add(
-        `${at}: ${JSON.stringify(path)} is ${snapshot.info.kind} in "${selectedVersion}"; its placeholder has no source lines or symbols.`,
-      );
+      errors.add(`${at}: ${JSON.stringify(path)} is ${snapshot.info.kind} in "${selectedVersion}"; its placeholder has no source lines or symbols.`);
       return;
     }
     if (snapshot.text === undefined) {
-      // Its missing or invalid blob was already reported during loading.
       return;
     }
-    const lines = snapshot.text.split("\n");
+    const lines = snapshot.text.split(`
+`);
     if (symbol !== undefined) {
-      const matches: number[] = [];
+      const matches = [];
       lines.forEach((line, index) => {
         if (line.includes(symbol)) {
           matches.push(index + 1);
         }
       });
       if (matches.length !== 1) {
-        const matchDescription = matches.length
-          ? `is ambiguous (${matches.length} matching lines: ${matches.slice(0, 8).join(", ")})`
-          : "was not found";
-        errors.add(
-          `${at}: symbol ${JSON.stringify(symbol)} ${matchDescription} in ${JSON.stringify(path)} (${selectedVersion}); use a unique literal substring or explicit line bounds.`,
-        );
+        const matchDescription = matches.length ? `is ambiguous (${matches.length} matching lines: ${matches.slice(0, 8).join(", ")})` : "was not found";
+        errors.add(`${at}: symbol ${JSON.stringify(symbol)} ${matchDescription} in ${JSON.stringify(path)} (${selectedVersion}); use a unique literal substring or explicit line bounds.`);
         return;
       }
       range = [matches[0], matches[0] + (count ?? 1) - 1];
     }
-    if (
-      range &&
-      (range[0] > lines.length || range[1] > lines.length || !Number.isSafeInteger(range[1]))
-    ) {
-      errors.add(
-        `${at}: line range ${range[0]}-${range[1]} exceeds ${JSON.stringify(path)} (${selectedVersion}, ${lines.length} lines).`,
-      );
+    if (range && (range[0] > lines.length || range[1] > lines.length || !Number.isSafeInteger(range[1]))) {
+      errors.add(`${at}: line range ${range[0]}-${range[1]} exceeds ${JSON.stringify(path)} (${selectedVersion}, ${lines.length} lines).`);
     }
   }
-
-  function applyChanges(step: Lesson["steps"][number], at: string): void {
+  function applyChanges(step, at) {
     for (const [path, change] of Object.entries(step.changes ?? {})) {
       const file = files.get(path);
       const changeAt = `${at}.changes[${JSON.stringify(path)}]`;
@@ -666,42 +508,32 @@ export async function validate(dir: string): Promise<ValidationResult> {
       if ("use" in change) {
         const target = head.get(path);
         if (!target) {
-          errors.add(
-            `${changeAt}: use:"head" requires a captured head; this file is deleted at head. Use null.`,
-          );
+          errors.add(`${changeAt}: use:"head" requires a captured head; this file is deleted at head. Use null.`);
         } else {
           current.set(path, target);
         }
       } else {
         if (file.base?.kind !== "text" && file.head?.kind !== "text") {
-          errors.add(
-            `${changeAt}: text overrides require a captured text base or head; use {use:"head"} for non-text files.`,
-          );
+          errors.add(`${changeAt}: text overrides require a captured text base or head; use {use:"head"} for non-text files.`);
           continue;
         }
         const bytes = Buffer.from(change.text, "utf8");
         if (bytes.toString("utf8") !== change.text) {
-          errors.add(
-            `${changeAt}.text: contains an unpaired UTF-16 surrogate; provide valid Unicode source.`,
-          );
+          errors.add(`${changeAt}.text: contains an unpaired UTF-16 surrogate; provide valid Unicode source.`);
           continue;
         }
-        // Text replaces content only. Adopting head is what also updates metadata.
         const mode = (current.get(path)?.info ?? file.base ?? file.head)?.mode;
         current.set(path, {
           info: { oid: "", size: bytes.length, kind: "text", mode },
           bytes,
-          text: change.text,
+          text: change.text
         });
       }
     }
   }
-
   for (const [index, step] of lesson.steps.entries()) {
     const at = `step ${JSON.stringify(step.id)} [${index}]`;
-    // A selection in this step must resolve after its changes have been applied.
     applyChanges(step, at);
-
     if (step.file !== undefined) {
       validateSelection(step.file, step.version, `${at}.file`, step.focus, step.symbol, step.count);
     }
@@ -710,24 +542,15 @@ export async function validate(dir: string): Promise<ValidationResult> {
         if (typeof part === "string") {
           continue;
         }
-        const link: SourceLink = part;
-        validateSelection(
-          link.path,
-          link.version,
-          `${at}.paragraphs[${paragraphIndex}][${partIndex}] (${JSON.stringify(link.label)})`,
-          link.start === undefined ? undefined : [link.start, link.end ?? link.start],
-          link.symbol,
-          link.count,
-        );
+        const link = part;
+        validateSelection(link.path, link.version, `${at}.paragraphs[${paragraphIndex}][${partIndex}] (${JSON.stringify(link.label)})`, link.start === undefined ? undefined : [link.start, link.end ?? link.start], link.symbol, link.count);
       }
     }
   }
-
   validateFinalState(manifest, current, head, errors);
   errors.throwIfAny();
   return { ok: true, files: files.size, steps: lesson.steps.length, textBlobs };
 }
-
 if (isMainModule(import.meta.url)) {
   try {
     requireSupportedRuntime();
@@ -738,14 +561,14 @@ if (isMainModule(import.meta.url)) {
       process.exitCode = 2;
     } else {
       const result = await validate(process.argv[2]);
-      console.log(
-        `Valid artifact: ${result.files} files, ${result.steps} steps, ${result.textBlobs} text blobs.`,
-      );
+      console.log(`Valid artifact: ${result.files} files, ${result.steps} steps, ${result.textBlobs} text blobs.`);
     }
   } catch (error) {
-    console.error(
-      error instanceof ValidationError ? error.message : `Validation failed: ${errorText(error)}`,
-    );
+    console.error(error instanceof ValidationError ? error.message : `Validation failed: ${errorText(error)}`);
     process.exitCode = 1;
   }
 }
+export {
+  validate,
+  ValidationError
+};

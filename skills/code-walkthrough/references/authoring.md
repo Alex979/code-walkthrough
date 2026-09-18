@@ -205,4 +205,4 @@ With that capture, the following lesson uses the exact contract and reaches head
 
 The opening leaves the source area empty; its reference opens the baseline on demand. The second step automatically shows the change, and its pointer selects the expression within that overview. The [bundled greeting example](../examples/greeting/lesson.json) extends this approach with repeated edits to the same file, related implementation and test changes, and pointers within a step that touches multiple files.
 
-This is an authoring illustration, not a replacement for test-generated fixture artifacts. Run `bun scripts/validate.ts ARTIFACT` against the actual capture and lesson before delivery.
+This is an authoring illustration, not a replacement for test-generated fixture artifacts. Run `node scripts/validate.mjs ARTIFACT` against the actual capture and lesson before delivery.

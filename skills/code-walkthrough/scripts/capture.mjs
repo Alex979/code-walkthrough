@@ -1,40 +1,38 @@
 #!/usr/bin/env node
-/** Read-only Git snapshots. Run `node scripts/capture.mjs --help` for CLI usage. */
+
+// skills/code-walkthrough/scripts/capture.ts
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isMainModule, requireSupportedRuntime } from "./runtime";
-import type { BlobInfo, FileInfo, Manifest } from "./types";
 
-export interface CaptureOptions {
-  repo: string;
-  out: string;
-  pr?: string | number;
-  branch?: string;
-  base?: string;
-  commit?: string;
-  range?: string;
-  uncommitted?: boolean;
-  staged?: boolean;
+// skills/code-walkthrough/scripts/runtime.ts
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+function isMainModule(moduleUrl, entryPath = process.argv[1]) {
+  if (!entryPath) {
+    return false;
+  }
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(entryPath);
+  } catch {
+    return false;
+  }
+}
+function requireSupportedRuntime(version = process.versions.node) {
+  const major = Number(version.split(".")[0]);
+  if (!Number.isInteger(major) || major < 22) {
+    throw new Error(`Node.js 22 or newer is required (found ${version}). Install a supported Node.js LTS release from https://nodejs.org/ and retry. No npm install is needed.`);
+  }
 }
 
-/** Only gh is injectable, so tests can exercise PR resolution without network/auth. */
-export interface CaptureDependencies {
-  gh?: (args: string[], cwd: string) => Promise<string>;
+// skills/code-walkthrough/scripts/capture.ts
+class OutputError extends Error {
 }
-
-type Entry = { oid: string; mode: string; conflict?: boolean };
-type Tree = Map<string, Entry>;
-type HashAlgorithm = "sha1" | "sha256";
-type GitCommand = (args: string[], input?: Buffer | string) => Promise<Buffer>;
-
-class OutputError extends Error {}
-
-const MAX_TEXT_BYTES = 2 * 1024 * 1024;
-const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-const HELP = `Usage: node scripts/capture.mjs --repo PATH --out PATH SCOPE
+var MAX_TEXT_BYTES = 2 * 1024 * 1024;
+var decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+var HELP = `Usage: node scripts/capture.mjs --repo PATH --out PATH SCOPE
 
 Choose exactly one scope:
   --pr URL|NUMBER          Resolve authenticated PR base/head with gh; use merge-base
@@ -59,16 +57,10 @@ or oversized index content conservatively stays raw in automatic mode. -text,
 unmanaged files, binary/large files and symlink targets retain raw bytes. No ident
 or working-tree-encoding conversion is performed. Commit/index blobs stay exact.
 `;
-
-function cleanEnv(): NodeJS.ProcessEnv {
-  // Ignore caller overrides that could redirect reads to another index or object store.
+function cleanEnv() {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
-    if (
-      /^GIT_(DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|NAMESPACE|CONFIG|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)$/.test(
-        key,
-      )
-    ) {
+    if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|NAMESPACE|CONFIG|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)$/.test(key)) {
       delete env[key];
     }
   }
@@ -79,54 +71,33 @@ function cleanEnv(): NodeJS.ProcessEnv {
     GIT_NO_REPLACE_OBJECTS: "1",
     GIT_TERMINAL_PROMPT: "0",
     GIT_LITERAL_PATHSPECS: "1",
-    GH_PROMPT_DISABLED: "1",
+    GH_PROMPT_DISABLED: "1"
   };
 }
-
-async function command(
-  executable: string,
-  args: string[],
-  cwd: string,
-  input?: Buffer | string,
-  allowedExitCodes = [0],
-): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      executable,
-      args,
-      { cwd, env: cleanEnv(), encoding: "buffer", maxBuffer: 64 * 1024 * 1024, windowsHide: true },
-      (error, stdout, stderr) => {
-        if (error && !allowedExitCodes.includes(Number(error.code))) {
-          reject(
-            new Error(
-              `${executable} ${args.join(" ")} failed: ${stderr.toString().trim() || error.message}`,
-            ),
-          );
-        } else {
-          resolve(stdout);
-        }
-      },
-    );
-    // A failed child can close its input before all batch requests are written.
+async function command(executable, args, cwd, input, allowedExitCodes = [0]) {
+  return new Promise((resolve2, reject) => {
+    const child = execFile(executable, args, { cwd, env: cleanEnv(), encoding: "buffer", maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
+      if (error && !allowedExitCodes.includes(Number(error.code))) {
+        reject(new Error(`${executable} ${args.join(" ")} failed: ${stderr.toString().trim() || error.message}`));
+      } else {
+        resolve2(stdout);
+      }
+    });
     child.stdin?.on("error", () => {});
     child.stdin?.end(input);
   });
 }
-
-function utf8(bytes: Uint8Array): string {
+function utf8(bytes) {
   try {
     return decoder.decode(bytes);
   } catch {
     throw new Error("Git returned a non-UTF-8 path; the manifest cannot represent it losslessly.");
   }
 }
-
-function oidFor(bytes: Buffer, algorithm: HashAlgorithm, type = "blob"): string {
-  // Git hashes the object header as well as its body, including the NUL separator.
-  return createHash(algorithm).update(`${type} ${bytes.length}\0`).update(bytes).digest("hex");
+function oidFor(bytes, algorithm, type = "blob") {
+  return createHash(algorithm).update(`${type} ${bytes.length}\x00`).update(bytes).digest("hex");
 }
-
-function isText(bytes: Buffer): boolean {
+function isText(bytes) {
   if (bytes.includes(0)) {
     return false;
   }
@@ -137,23 +108,18 @@ function isText(bytes: Buffer): boolean {
     return false;
   }
 }
-
-/** Oversized files are streamed for hashing without retaining their full contents. */
-function contentKind(bytes: Buffer, totalSize: number): BlobInfo["kind"] {
+function contentKind(bytes, totalSize) {
   if (totalSize > MAX_TEXT_BYTES) {
     return "large";
   }
   return isText(bytes) ? "text" : "binary";
 }
-
-// Git's automatic EOL heuristic differs from UTF-8 eligibility: bare CR and
-// excessive control bytes must remain raw. See git/convert.c gather_stats.
-function eolStats(bytes: Buffer): { crlf: boolean; binary: boolean } {
+function eolStats(bytes) {
   let crlf = false;
   let binary = false;
   let printable = 0;
   let controls = 0;
-  for (let i = 0; i < bytes.length; i++) {
+  for (let i = 0;i < bytes.length; i++) {
     const byte = bytes[i];
     if (byte === 13) {
       if (bytes[i + 1] === 10) {
@@ -166,23 +132,19 @@ function eolStats(bytes: Buffer): { crlf: boolean; binary: boolean } {
       if (byte === 0) {
         binary = true;
       }
-      if (byte === 127 || (byte < 32 && ![8, 9, 27, 12].includes(byte))) {
+      if (byte === 127 || byte < 32 && ![8, 9, 27, 12].includes(byte)) {
         controls++;
       } else {
         printable++;
       }
     }
   }
-  // Git ignores a trailing DOS end-of-file marker when counting controls.
   if (bytes[bytes.length - 1] === 26) {
     controls--;
   }
   return { crlf, binary: binary || Math.floor(printable / 128) < controls };
 }
-
-type EolAction = "raw" | "auto" | "text";
-
-function attributeEolAction(value: string | undefined): EolAction | undefined {
+function attributeEolAction(value) {
   if (value === "unset") {
     return "raw";
   }
@@ -192,10 +154,9 @@ function attributeEolAction(value: string | undefined): EolAction | undefined {
   if (value === "auto") {
     return "auto";
   }
-  return undefined;
+  return;
 }
-
-function eolAction(attrs: Record<string, string>, autocrlf: string): EolAction {
+function eolAction(attrs, autocrlf) {
   const action = attributeEolAction(attrs.text) ?? attributeEolAction(attrs.crlf);
   if (action === "raw") {
     return "raw";
@@ -205,20 +166,15 @@ function eolAction(attrs: Record<string, string>, autocrlf: string): EolAction {
   }
   return action ?? (/^(true|yes|on|1|input)$/i.test(autocrlf) ? "auto" : "raw");
 }
-
-function within(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return (
-    relative === "" ||
-    (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
-  );
+function within(parent, candidate) {
+  const relative2 = path.relative(parent, candidate);
+  return relative2 === "" || !relative2.startsWith(`..${path.sep}`) && relative2 !== ".." && !path.isAbsolute(relative2);
 }
-
-async function canonicalFuturePath(target: string): Promise<string> {
+async function canonicalFuturePath(target) {
   try {
     return await fs.realpath(target);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    if (error.code !== "ENOENT") {
       throw error;
     }
     const parent = path.dirname(target);
@@ -228,8 +184,7 @@ async function canonicalFuturePath(target: string): Promise<string> {
     return path.join(await canonicalFuturePath(parent), path.basename(target));
   }
 }
-
-function validateOptions(options: CaptureOptions): void {
+function validateOptions(options) {
   if (!options.repo || !options.out) {
     throw new Error("--repo and --out are required.");
   }
@@ -238,12 +193,10 @@ function validateOptions(options: CaptureOptions): void {
     options.branch !== undefined,
     options.commit !== undefined,
     options.range !== undefined,
-    !!options.uncommitted,
+    !!options.uncommitted
   ];
   if (scopes.filter(Boolean).length !== 1) {
-    throw new Error(
-      "Choose exactly one scope: --pr, --branch, --commit, --range, or --uncommitted.",
-    );
+    throw new Error("Choose exactly one scope: --pr, --branch, --commit, --range, or --uncommitted.");
   }
   if (options.branch !== undefined && !options.base) {
     throw new Error("--branch requires --base.");
@@ -254,47 +207,34 @@ function validateOptions(options: CaptureOptions): void {
   if (options.staged && !options.uncommitted) {
     throw new Error("--staged requires --uncommitted.");
   }
-  if (
-    options.pr !== undefined &&
-    !/^(?:[1-9]\d*|https:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/[1-9]\d*\/?$)/.test(String(options.pr))
-  ) {
+  if (options.pr !== undefined && !/^(?:[1-9]\d*|https:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/[1-9]\d*\/?$)/.test(String(options.pr))) {
     throw new Error("--pr must be a PR number or an HTTPS pull request URL.");
   }
 }
-
-function workingFileMode(
-  indexMode: string,
-  filesystemMode: number,
-  trackExecutableBit: boolean,
-  symlinks: boolean,
-): string {
-  // With core.symlinks=false Git materializes a tracked link as a regular file.
+function workingFileMode(indexMode, filesystemMode, trackExecutableBit, symlinks) {
   if (!symlinks && indexMode === "120000") {
     return "120000";
   }
   if (trackExecutableBit) {
-    return filesystemMode & 0o111 ? "100755" : "100644";
+    return filesystemMode & 73 ? "100755" : "100644";
   }
   return indexMode === "100755" ? "100755" : "100644";
 }
-
-function fileStatus(base: BlobInfo | undefined, head: BlobInfo | undefined): FileInfo["status"] {
+function fileStatus(base, head) {
   if (!base) {
     return "A";
   }
   if (!head) {
     return "D";
   }
-  // Unread working content has no OID and cannot establish an unchanged file.
   if (base.oid !== head.oid || base.mode !== head.mode || !head.oid) {
     return "M";
   }
   return "";
 }
-
-async function readTree(git: GitCommand, revision: string): Promise<Tree> {
-  const result: Tree = new Map();
-  for (const row of utf8(await git(["ls-tree", "-r", "-z", "--full-tree", revision])).split("\0")) {
+async function readTree(git, revision) {
+  const result = new Map;
+  for (const row of utf8(await git(["ls-tree", "-r", "-z", "--full-tree", revision])).split("\x00")) {
     if (!row) {
       continue;
     }
@@ -306,10 +246,9 @@ async function readTree(git: GitCommand, revision: string): Promise<Tree> {
   }
   return result;
 }
-
-async function readIndex(git: GitCommand): Promise<Tree> {
-  const indexTree: Tree = new Map();
-  for (const row of utf8(await git(["ls-files", "--stage", "-z", "--full-name"])).split("\0")) {
+async function readIndex(git) {
+  const indexTree = new Map;
+  for (const row of utf8(await git(["ls-files", "--stage", "-z", "--full-name"])).split("\x00")) {
     if (!row) {
       continue;
     }
@@ -317,23 +256,19 @@ async function readIndex(git: GitCommand): Promise<Tree> {
     if (!match) {
       throw new Error("Unexpected index record.");
     }
-    // Multiple conflict stages share a path; none is a single resolved index blob.
     const previous = indexTree.get(match[4]);
     indexTree.set(match[4], {
       mode: match[1],
       oid: match[2],
-      conflict: match[3] !== "0" || previous?.conflict,
+      conflict: match[3] !== "0" || previous?.conflict
     });
   }
   return indexTree;
 }
-
-async function addUntrackedPaths(repo: string, indexTree: Tree): Promise<void> {
-  // Git for Windows may traverse junctions in ls-files --others. Discover
-  // candidates ourselves without following links, then let Git apply ignores.
+async function addUntrackedPaths(repo, indexTree) {
   let directories = [""];
   while (directories.length) {
-    const candidates: Array<{ name: string; directory: boolean }> = [];
+    const candidates = [];
     for (const directory of directories) {
       const absolute = path.join(repo, directory);
       const stat = await fs.lstat(absolute);
@@ -355,31 +290,20 @@ async function addUntrackedPaths(repo: string, indexTree: Tree): Promise<void> {
     if (!candidates.length) {
       break;
     }
-    // --no-index makes ignore decisions independent of tracked descendants;
-    // their content is already represented by indexTree's index entries.
-    const input =
-      candidates.map((entry) => "./" + entry.name + (entry.directory ? "/" : "")).join("\0") + "\0";
-    const records = utf8(
-      await command(
-        "git",
-        [
-          "--no-literal-pathspecs",
-          "check-ignore",
-          "--no-index",
-          "--stdin",
-          "-z",
-          "--verbose",
-          "--non-matching",
-        ],
-        repo,
-        input,
-        [0, 1],
-      ),
-    ).split("\0");
+    const input = candidates.map((entry) => "./" + entry.name + (entry.directory ? "/" : "")).join("\x00") + "\x00";
+    const records = utf8(await command("git", [
+      "--no-literal-pathspecs",
+      "check-ignore",
+      "--no-index",
+      "--stdin",
+      "-z",
+      "--verbose",
+      "--non-matching"
+    ], repo, input, [0, 1])).split("\x00");
     if (records.length !== candidates.length * 4 + 1) {
       throw new Error("Unexpected check-ignore response.");
     }
-    for (let i = 0; i < candidates.length; i++) {
+    for (let i = 0;i < candidates.length; i++) {
       const candidate = candidates[i];
       const pattern = records[i * 4 + 2];
       if (pattern && !pattern.startsWith("!")) {
@@ -391,7 +315,7 @@ async function addUntrackedPaths(repo: string, indexTree: Tree): Promise<void> {
           await fs.lstat(path.join(repo, candidate.name, ".git"));
           nestedRepo = true;
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          if (error.code !== "ENOENT") {
             throw error;
           }
         }
@@ -404,29 +328,19 @@ async function addUntrackedPaths(repo: string, indexTree: Tree): Promise<void> {
     }
   }
 }
-
-async function attributeCandidatePaths(repo: string, workingTree: Tree): Promise<string[]> {
-  const names: string[] = [];
+async function attributeCandidatePaths(repo, workingTree) {
+  const names = [];
   for (const [name, entry] of workingTree) {
     if (entry.mode !== "100644" && entry.mode !== "100755") {
       continue;
     }
     const parts = name.split("/");
-    if (
-      parts.some(
-        (part) =>
-          !part ||
-          part === "." ||
-          part === ".." ||
-          (process.platform === "win32" && /[\\:]/.test(part)),
-      )
-    ) {
+    if (parts.some((part) => !part || part === "." || part === ".." || process.platform === "win32" && /[\\:]/.test(part))) {
       continue;
     }
-    // Do not let attribute lookup read .gitattributes behind a symlink ancestor.
     let current = repo;
     try {
-      for (let i = 0; i < parts.length; i++) {
+      for (let i = 0;i < parts.length; i++) {
         current = path.join(current, parts[i]);
         const stat = await fs.lstat(current);
         if (stat.isSymbolicLink()) {
@@ -440,95 +354,56 @@ async function attributeCandidatePaths(repo: string, workingTree: Tree): Promise
           break;
         }
       }
-    } catch {
-      /* Working-content capture below records missing/unavailable files. */
-    }
+    } catch {}
   }
   return names;
 }
-
-async function resolveScope(
-  options: CaptureOptions,
-  dependencies: CaptureDependencies,
-  repo: string,
-  algorithm: HashAlgorithm,
-  gitText: (args: string[]) => Promise<string>,
-): Promise<{
-  scope: Record<string, unknown>;
-  base: string;
-  head: string;
-  emptyBase: boolean;
-  title: string | undefined;
-  sourceUrl: string | undefined;
-}> {
-  const validOid = (value: unknown): value is string =>
-    typeof value === "string" &&
-    new RegExp(`^[0-9a-f]{${algorithm === "sha1" ? 40 : 64}}$`).test(value);
-  const resolveCommit = async (ref: string): Promise<string> => {
-    if (!ref || ref.startsWith("-") || ref.includes("\0")) {
+async function resolveScope(options, dependencies, repo, algorithm, gitText) {
+  const validOid = (value) => typeof value === "string" && new RegExp(`^[0-9a-f]{${algorithm === "sha1" ? 40 : 64}}$`).test(value);
+  const resolveCommit = async (ref) => {
+    if (!ref || ref.startsWith("-") || ref.includes("\x00")) {
       throw new Error(`Invalid revision: ${ref}`);
     }
     try {
       return await gitText(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]);
     } catch {
-      throw new Error(
-        `Commit ${JSON.stringify(ref)} is not available locally. Fetch the required ref/history explicitly in your repository, then retry.`,
-      );
+      throw new Error(`Commit ${JSON.stringify(ref)} is not available locally. Fetch the required ref/history explicitly in your repository, then retry.`);
     }
   };
-  const mergeBase = async (baseRevision: string, headRevision: string): Promise<string> => {
-    let bases: string[];
+  const mergeBase = async (baseRevision, headRevision) => {
+    let bases;
     try {
-      bases = (await gitText(["merge-base", "--all", baseRevision, headRevision]))
-        .split(/\r?\n/)
-        .filter(Boolean);
+      bases = (await gitText(["merge-base", "--all", baseRevision, headRevision])).split(/\r?\n/).filter(Boolean);
     } catch {
-      throw new Error(
-        "No local merge-base is available. Fetch the required history explicitly (deepen/unshallow a shallow clone), then retry.",
-      );
+      throw new Error("No local merge-base is available. Fetch the required history explicitly (deepen/unshallow a shallow clone), then retry.");
     }
     if (bases.length !== 1) {
       throw new Error("Multiple merge bases exist; select one explicitly with --range A..B.");
     }
     return bases[0];
   };
-
-  const scope: Record<string, unknown> = {
+  const scope = {
     objectFormat: algorithm,
-    textLimitBytes: MAX_TEXT_BYTES,
+    textLimitBytes: MAX_TEXT_BYTES
   };
-  let base: string;
-  let head: string;
+  let base;
+  let head;
   let emptyBase = false;
-  let title: string | undefined;
-  let sourceUrl: string | undefined;
+  let title;
+  let sourceUrl;
   if (options.pr !== undefined) {
     const args = [
       "pr",
       "view",
       String(options.pr),
       "--json",
-      "number,url,title,baseRefName,baseRefOid,headRefName,headRefOid",
+      "number,url,title,baseRefName,baseRefOid,headRefName,headRefOid"
     ];
-    let pr: {
-      number: number;
-      url: string;
-      title: string;
-      baseRefName: string;
-      baseRefOid: string;
-      headRefName: string;
-      headRefOid: string;
-    };
+    let pr;
     try {
-      pr = JSON.parse(
-        await (dependencies.gh
-          ? dependencies.gh(args, repo)
-          : command("gh", args, repo).then((result) => result.toString("utf8"))),
-      );
+      pr = JSON.parse(await (dependencies.gh ? dependencies.gh(args, repo) : command("gh", args, repo).then((result) => result.toString("utf8"))));
     } catch (error) {
-      throw new Error(
-        `Authenticated PR resolution through gh failed. Check gh auth status and the repository remote. ${String(error)}`,
-      );
+      throw new Error(`Authenticated PR resolution through gh failed. Check gh auth status and the repository remote. ${String(error)}`);
     }
     if (!validOid(pr.baseRefOid) || !validOid(pr.headRefOid) || !/^https:\/\//.test(pr.url)) {
       throw new Error("gh returned incomplete or invalid PR revisions.");
@@ -537,9 +412,7 @@ async function resolveScope(
       await resolveCommit(pr.baseRefOid);
       head = await resolveCommit(pr.headRefOid);
     } catch (error) {
-      throw new Error(
-        `PR #${pr.number} objects are missing locally. This capture never fetches automatically. In the repository, fetch the authenticated PR refs explicitly, for example: git fetch <verified-base-remote> ${JSON.stringify(pr.baseRefName)} refs/pull/${pr.number}/head. For forks, fetch the head ref from the verified fork remote if needed. Then retry; the fetched OIDs must match gh. ${String(error)}`,
-      );
+      throw new Error(`PR #${pr.number} objects are missing locally. This capture never fetches automatically. In the repository, fetch the authenticated PR refs explicitly, for example: git fetch <verified-base-remote> ${JSON.stringify(pr.baseRefName)} refs/pull/${pr.number}/head. For forks, fetch the head ref from the verified fork remote if needed. Then retry; the fetched OIDs must match gh. ${String(error)}`);
     }
     base = await mergeBase(pr.baseRefOid, head);
     title = pr.title;
@@ -553,10 +426,10 @@ async function resolveScope(
       baseRevision: pr.baseRefOid,
       headRevision: head,
       mergeBase: base,
-      comparison: "merge-base-to-head",
+      comparison: "merge-base-to-head"
     });
   } else if (options.branch !== undefined) {
-    const baseRevision = await resolveCommit(options.base!);
+    const baseRevision = await resolveCommit(options.base);
     head = await resolveCommit(options.branch);
     base = await mergeBase(baseRevision, head);
     Object.assign(scope, {
@@ -566,12 +439,13 @@ async function resolveScope(
       baseRevision,
       headRevision: head,
       mergeBase: base,
-      comparison: "merge-base-to-head",
+      comparison: "merge-base-to-head"
     });
   } else if (options.commit !== undefined) {
     head = await resolveCommit(options.commit);
-    // Read real commit headers: rev-list suppresses parents at a shallow boundary.
-    const headers = (await gitText(["cat-file", "commit", head])).split("\n\n", 1)[0];
+    const headers = (await gitText(["cat-file", "commit", head])).split(`
+
+`, 1)[0];
     const parents = [...headers.matchAll(/^parent ([0-9a-f]+)$/gm)].map((match) => match[1]);
     emptyBase = parents.length === 0;
     base = emptyBase ? oidFor(Buffer.alloc(0), algorithm, "tree") : await resolveCommit(parents[0]);
@@ -582,14 +456,13 @@ async function resolveScope(
       headRevision: head,
       parents,
       emptyBase,
-      comparison: "first-parent-to-commit",
+      comparison: "first-parent-to-commit"
     });
   } else if (options.range !== undefined) {
     const match = /^(.+?)(\.{3}|\.{2})([^.].*)$/.exec(options.range);
     if (!match || match[1].includes("..") || match[3].includes("..")) {
       throw new Error("--range requires explicit A..B or A...B endpoints.");
     }
-    // Two dots compare endpoint trees; three dots start at the shared ancestor.
     const baseRevision = await resolveCommit(match[1]);
     head = await resolveCommit(match[3]);
     base = match[2] === "..." ? await mergeBase(baseRevision, head) : baseRevision;
@@ -601,7 +474,7 @@ async function resolveScope(
       baseRevision,
       headRevision: head,
       comparison: match[2] === "..." ? "merge-base-to-head" : "tree-to-tree",
-      ...(match[2] === "..." ? { mergeBase: base } : {}),
+      ...match[2] === "..." ? { mergeBase: base } : {}
     });
   } else {
     base = await resolveCommit("HEAD");
@@ -616,64 +489,38 @@ async function resolveScope(
       includesUntracked: !options.staged,
       includesIgnoredUntracked: false,
       comparison: options.staged ? "HEAD-to-index" : "HEAD-to-working-tree",
-      content: options.staged
-        ? "exact index blobs"
-        : "working bytes with Git-managed CRLF normalized to LF for UTF-8 text <= 2 MiB; hashes, sizes and status describe captured bytes",
+      content: options.staged ? "exact index blobs" : "working bytes with Git-managed CRLF normalized to LF for UTF-8 text <= 2 MiB; hashes, sizes and status describe captured bytes",
       symlinks: "link-target bytes; never followed",
-      atomic: false,
+      atomic: false
     });
   }
-
   return { scope, base, head, emptyBase, title, sourceUrl };
 }
-
-/** Returns exactly the manifest written to out. Never writes to the source repo. */
-export async function capture(
-  options: CaptureOptions,
-  dependencies: CaptureDependencies = {},
-): Promise<Manifest> {
+async function capture(options, dependencies = {}) {
   validateOptions(options);
   const initial = await fs.realpath(path.resolve(options.repo));
-  const git = (args: string[], input?: Buffer | string) =>
-    command(
-      "git",
-      ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
-      initial,
-      input,
-    );
-  const gitText = async (args: string[]) => (await git(args)).toString("utf8").trim();
-  const bare = (await gitText(["rev-parse", "--is-bare-repository"])) === "true";
+  const git = (args, input) => command("git", ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args], initial, input);
+  const gitText = async (args) => (await git(args)).toString("utf8").trim();
+  const bare = await gitText(["rev-parse", "--is-bare-repository"]) === "true";
   if (bare && options.uncommitted) {
     throw new Error("--uncommitted requires a working tree.");
   }
   const repo = await fs.realpath(bare ? initial : await gitText(["rev-parse", "--show-toplevel"]));
-
-  // Run all subsequent commands at the root, including when --repo is a subdirectory.
-  const rootGit = (args: string[], input?: Buffer | string) =>
-    command(
-      "git",
-      ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
-      repo,
-      input,
-    );
-  const rootText = async (args: string[]) => (await rootGit(args)).toString("utf8").trim();
+  const rootGit = (args, input) => command("git", ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args], repo, input);
+  const rootText = async (args) => (await rootGit(args)).toString("utf8").trim();
   const gitDir = await fs.realpath(await rootText(["rev-parse", "--absolute-git-dir"]));
-  const commonDir = await fs.realpath(
-    path.resolve(repo, await rootText(["rev-parse", "--git-common-dir"])),
-  );
-
+  const commonDir = await fs.realpath(path.resolve(repo, await rootText(["rev-parse", "--git-common-dir"])));
   const outRequested = path.resolve(options.out);
   const out = await canonicalFuturePath(outRequested);
   if ([repo, gitDir, commonDir].some((root) => within(root, out))) {
     throw new Error("Output must be outside the source repository/worktree and Git directory.");
   }
-  // Reject a final symlink even if it points at an otherwise valid empty directory.
   try {
     if ((await fs.lstat(outRequested)).isSymbolicLink()) {
       throw new Error("Output directory must not be a symlink.");
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    if (error.code !== "ENOENT") {
       throw error;
     }
   }
@@ -682,26 +529,17 @@ export async function capture(
       throw new Error("Output directory is nonempty; choose a new empty output directory.");
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    if (error.code !== "ENOENT") {
       throw error;
     }
   }
-
   const algorithm = await rootText(["rev-parse", "--show-object-format"]);
   if (algorithm !== "sha1" && algorithm !== "sha256") {
     throw new Error(`Unsupported Git object format: ${algorithm}`);
   }
-  const { scope, base, head, emptyBase, title, sourceUrl } = await resolveScope(
-    options,
-    dependencies,
-    repo,
-    algorithm,
-    rootText,
-  );
-
-  // Every capture includes unchanged tree entries as context, not just diff paths.
-  const baseTree = emptyBase ? new Map<string, Entry>() : await readTree(rootGit, base);
-  let headTree: Tree;
+  const { scope, base, head, emptyBase, title, sourceUrl } = await resolveScope(options, dependencies, repo, algorithm, rootText);
+  const baseTree = emptyBase ? new Map : await readTree(rootGit, base);
+  let headTree;
   if (options.uncommitted) {
     headTree = await readIndex(rootGit);
     if (!options.staged) {
@@ -710,33 +548,23 @@ export async function capture(
   } else {
     headTree = await readTree(rootGit, head);
   }
-
-  const eolActions = new Map<string, EolAction>();
-  const normalizedPaths: string[] = [];
-  const unknownIndexPaths: string[] = [];
+  const eolActions = new Map;
+  const normalizedPaths = [];
+  const unknownIndexPaths = [];
   if (options.uncommitted && !options.staged) {
     let autocrlf = "false";
     try {
       autocrlf = await rootText(["config", "--get", "core.autocrlf"]);
-    } catch {
-      /* default false */
-    }
-
+    } catch {}
     const names = await attributeCandidatePaths(repo, headTree);
     if (names.length) {
-      const records = utf8(
-        await rootGit(
-          ["check-attr", "-z", "--stdin", "text", "eol", "crlf"],
-          names.join("\0") + "\0",
-        ),
-      ).split("\0");
+      const records = utf8(await rootGit(["check-attr", "-z", "--stdin", "text", "eol", "crlf"], names.join("\x00") + "\x00")).split("\x00");
       if (records.length !== names.length * 9 + 1) {
         throw new Error("Unexpected check-attr response.");
       }
-      // Each path yields three NUL-delimited path/attribute/value triples.
-      for (let i = 0; i < names.length; i++) {
-        const attrs: Record<string, string> = {};
-        for (let j = 0; j < 9; j += 3) {
+      for (let i = 0;i < names.length; i++) {
+        const attrs = {};
+        for (let j = 0;j < 9; j += 3) {
           const offset = i * 9 + j;
           if (records[offset] !== names[i]) {
             throw new Error("Unexpected path in check-attr response.");
@@ -748,19 +576,14 @@ export async function capture(
     }
     scope.eol = {
       coreAutocrlf: autocrlf,
-      attributes:
-        "effective working-tree text/eol/crlf attributes via git check-attr (Git index fallback)",
-      policy:
-        "CRLF-to-LF for eligible UTF-8 regular files <= 2 MiB; automatic mode respects Git binary heuristic and existing index CRLF",
+      attributes: "effective working-tree text/eol/crlf attributes via git check-attr (Git index fallback)",
+      policy: "CRLF-to-LF for eligible UTF-8 regular files <= 2 MiB; automatic mode respects Git binary heuristic and existing index CRLF",
       raw: "-text, unmanaged, binary/large and symlink content; automatic mode with unavailable/oversized index content",
       otherConversions: "none: custom filters, ident and working-tree-encoding are not applied",
       normalizedPaths,
-      unknownIndexPaths,
+      unknownIndexPaths
     };
   }
-
-  // Reserve only after revision/tree validation. A failed capture leaves a nonempty
-  // incomplete directory intentionally; retries must use a fresh output path.
   await fs.mkdir(out, { recursive: true });
   if ((await fs.readdir(out)).length) {
     throw new Error("Output directory became nonempty; refusing to overwrite it.");
@@ -768,8 +591,8 @@ export async function capture(
   const lock = await fs.open(path.join(out, ".capture-in-progress"), "wx");
   await lock.close();
   await fs.mkdir(path.join(out, "blobs"));
-  const written = new Set<string>();
-  const writeBlob = async (oid: string, bytes: Buffer) => {
+  const written = new Set;
+  const writeBlob = async (oid, bytes) => {
     if (written.has(oid)) {
       return;
     }
@@ -780,47 +603,26 @@ export async function capture(
     }
     written.add(oid);
   };
-
-  const unavailable: Array<{ path: string; version: "base" | "head"; reason: string }> = [];
-  const missing = (
-    name: string,
-    version: "base" | "head",
-    entry: Entry,
-    reason: string,
-  ): BlobInfo => {
+  const unavailable = [];
+  const missing = (name, version, entry, reason) => {
     unavailable.push({ path: name, version, reason });
     return { oid: entry.oid, mode: entry.mode, size: 0, kind: "unavailable" };
   };
-
-  // Batch metadata first, then bounded batches of eligible blob bodies. Large blobs
-  // never enter memory; raw cat-file bytes bypass attributes and conversion filters.
-  const objects = new Map<string, Omit<BlobInfo, "mode">>();
-  // Index blobs inform automatic EOL conversion, but working captures only store
-  // bodies actually used by the baseline or a captured endpoint.
-  const snapshotIds = new Set(
-    [
-      ...baseTree.values(),
-      ...(!options.uncommitted || options.staged ? headTree.values() : []),
-    ].map((entry) => entry.oid),
-  );
-  const indexCrlf = new Map<string, boolean>();
+  const objects = new Map;
+  const snapshotIds = new Set([
+    ...baseTree.values(),
+    ...!options.uncommitted || options.staged ? headTree.values() : []
+  ].map((entry) => entry.oid));
+  const indexCrlf = new Map;
   const ids = [
-    ...new Set(
-      [...baseTree.values(), ...headTree.values()]
-        .filter((entry) => entry.oid && entry.mode !== "160000" && !entry.conflict)
-        .map((entry) => entry.oid),
-    ),
+    ...new Set([...baseTree.values(), ...headTree.values()].filter((entry) => entry.oid && entry.mode !== "160000" && !entry.conflict).map((entry) => entry.oid))
   ];
-  const eligible: Array<{ oid: string; size: number }> = [];
+  const eligible = [];
   if (ids.length) {
-    const rows = utf8(
-      await rootGit(
-        ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
-        `${ids.join("\n")}\n`,
-      ),
-    )
-      .trim()
-      .split("\n");
+    const rows = utf8(await rootGit(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], `${ids.join(`
+`)}
+`)).trim().split(`
+`);
     if (rows.length !== ids.length) {
       throw new Error("Incomplete cat-file metadata batch.");
     }
@@ -839,29 +641,21 @@ export async function capture(
       }
     });
   }
-  for (let start = 0; start < eligible.length;) {
+  for (let start = 0;start < eligible.length; ) {
     let end = start;
     let batchBytes = 0;
-    while (
-      end < eligible.length &&
-      (end === start || batchBytes + eligible[end].size <= 16 * 1024 * 1024) &&
-      end - start < 4096
-    ) {
+    while (end < eligible.length && (end === start || batchBytes + eligible[end].size <= 16 * 1024 * 1024) && end - start < 4096) {
       batchBytes += eligible[end].size;
       end++;
     }
     const batch = eligible.slice(start, end);
-    const buffer = await rootGit(
-      ["cat-file", "--batch"],
-      `${batch.map((entry) => entry.oid).join("\n")}\n`,
-    );
+    const buffer = await rootGit(["cat-file", "--batch"], `${batch.map((entry) => entry.oid).join(`
+`)}
+`);
     let offset = 0;
     for (const entry of batch) {
       const newline = buffer.indexOf(10, offset);
-      if (
-        newline < 0 ||
-        buffer.subarray(offset, newline).toString() !== `${entry.oid} blob ${entry.size}`
-      ) {
+      if (newline < 0 || buffer.subarray(offset, newline).toString() !== `${entry.oid} blob ${entry.size}`) {
         throw new Error("Invalid cat-file blob header.");
       }
       const body = buffer.subarray(newline + 1, newline + 1 + entry.size);
@@ -882,83 +676,51 @@ export async function capture(
     }
     start = end;
   }
-  const fromObject = (name: string, version: "base" | "head", entry: Entry): BlobInfo => {
+  const fromObject = (name, version, entry) => {
     if (entry.mode === "160000") {
-      return missing(
-        name,
-        version,
-        entry,
-        "submodule gitlink; not a blob; submodule content is not traversed",
-      );
+      return missing(name, version, entry, "submodule gitlink; not a blob; submodule content is not traversed");
     }
     if (entry.conflict) {
-      return missing(
-        name,
-        version,
-        { ...entry, oid: "" },
-        "unmerged index stages; no single index blob exists",
-      );
+      return missing(name, version, { ...entry, oid: "" }, "unmerged index stages; no single index blob exists");
     }
     const info = objects.get(entry.oid);
     if (!info || info.kind === "unavailable") {
-      return missing(
-        name,
-        version,
-        entry,
-        "Git blob unavailable locally; fetch required objects explicitly",
-      );
+      return missing(name, version, entry, "Git blob unavailable locally; fetch required objects explicitly");
     }
     return { ...info, mode: entry.mode };
   };
-
   let fileMode = false;
   let symlinks = true;
   if (options.uncommitted && !options.staged) {
     try {
-      fileMode = (await rootText(["config", "--bool", "core.filemode"])) === "true";
-    } catch {
-      /* Git's default is false. */
-    }
+      fileMode = await rootText(["config", "--bool", "core.filemode"]) === "true";
+    } catch {}
     try {
-      symlinks = (await rootText(["config", "--bool", "core.symlinks"])) !== "false";
-    } catch {
-      /* Git's default is true. */
-    }
+      symlinks = await rootText(["config", "--bool", "core.symlinks"]) !== "false";
+    } catch {}
   }
-  const workingFile = async (name: string, entry: Entry): Promise<BlobInfo | undefined> => {
-    // For unknown content an empty oid is deliberate: never claim the index OID
-    // identifies unread working bytes. Known gitlinks retain their commit OID.
+  const workingFile = async (name, entry) => {
     const unknown = { ...entry, oid: "" };
     const parts = name.split("/");
     const absolute = path.resolve(repo, ...parts);
-    if (
-      !within(repo, absolute) ||
-      parts.some((part) => !part || part === "." || part === "..") ||
-      (process.platform === "win32" &&
-        parts.some((part) => part.includes("\\") || part.includes(":")))
-    ) {
+    if (!within(repo, absolute) || parts.some((part) => !part || part === "." || part === "..") || process.platform === "win32" && parts.some((part) => part.includes("\\") || part.includes(":"))) {
       return missing(name, "head", unknown, "unsafe filesystem path");
     }
     try {
       let parent = repo;
       for (const part of parts.slice(0, -1)) {
         parent = path.join(parent, part);
-        const stat = await fs.lstat(parent);
-        if (stat.isSymbolicLink()) {
+        const stat2 = await fs.lstat(parent);
+        if (stat2.isSymbolicLink()) {
           return missing(name, "head", unknown, "symlink ancestor; not followed");
         }
-        if (!stat.isDirectory()) {
-          return undefined;
+        if (!stat2.isDirectory()) {
+          return;
         }
       }
       const stat = await fs.lstat(absolute);
       if (entry.mode === "160000") {
-        return missing(
-          name,
-          "head",
-          entry,
-          "submodule gitlink; working submodule contents are not traversed or captured",
-        );
+        return missing(name, "head", entry, "submodule gitlink; working submodule contents are not traversed or captured");
       }
       if (stat.isSymbolicLink()) {
         const bytes = await fs.readlink(absolute, { encoding: "buffer" });
@@ -972,17 +734,14 @@ export async function capture(
       if (!stat.isFile()) {
         return missing(name, "head", unknown, "not a regular file or symlink");
       }
-      const handle = await fs.open(
-        absolute,
-        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
-      );
+      const handle = await fs.open(absolute, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
       try {
         const before = await handle.stat();
         if (!before.isFile() || before.ino !== stat.ino || before.dev !== stat.dev) {
           return missing(name, "head", unknown, "file changed while opening");
         }
-        const hash = createHash(algorithm).update(`blob ${before.size}\0`);
-        const chunks: Buffer[] = [];
+        const hash = createHash(algorithm).update(`blob ${before.size}\x00`);
+        const chunks = [];
         const buffer = Buffer.alloc(64 * 1024);
         let total = 0;
         while (true) {
@@ -1001,35 +760,22 @@ export async function capture(
         }
         const after = await handle.stat();
         const current = await fs.lstat(absolute);
-        if (
-          total !== before.size ||
-          before.mtimeMs !== after.mtimeMs ||
-          before.ctimeMs !== after.ctimeMs ||
-          current.isSymbolicLink() ||
-          current.ino !== before.ino ||
-          current.dev !== before.dev
-        ) {
+        if (total !== before.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || current.isSymbolicLink() || current.ino !== before.ino || current.dev !== before.dev) {
           return missing(name, "head", unknown, "file changed during capture");
         }
         let oid = hash.digest("hex");
         let bytes = Buffer.concat(chunks);
-
         const kind = contentKind(bytes, total);
         const action = eolActions.get(name) ?? "raw";
-        if (kind === "text" && action !== "raw" && bytes.includes(Buffer.from("\r\n"))) {
-          const unknownIndex =
-            action === "auto" && !!entry.oid && !entry.conflict && !indexCrlf.has(entry.oid);
+        if (kind === "text" && action !== "raw" && bytes.includes(Buffer.from(`\r
+`))) {
+          const unknownIndex = action === "auto" && !!entry.oid && !entry.conflict && !indexCrlf.has(entry.oid);
           if (unknownIndex) {
             unknownIndexPaths.push(name);
           }
-          if (
-            action === "text" ||
-            (!unknownIndex &&
-              !eolStats(bytes).binary &&
-              (entry.conflict || !indexCrlf.get(entry.oid)))
-          ) {
-            // Latin-1 is a lossless byte mapping, preserving BOMs and Unicode bytes.
-            bytes = Buffer.from(bytes.toString("latin1").replace(/\r\n/g, "\n"), "latin1");
+          if (action === "text" || !unknownIndex && !eolStats(bytes).binary && (entry.conflict || !indexCrlf.get(entry.oid))) {
+            bytes = Buffer.from(bytes.toString("latin1").replace(/\r\n/g, `
+`), "latin1");
             total = bytes.length;
             oid = oidFor(bytes, algorithm);
             normalizedPaths.push(name);
@@ -1047,30 +793,23 @@ export async function capture(
       if (error instanceof OutputError) {
         throw error;
       }
-      const code = (error as NodeJS.ErrnoException).code;
+      const code = error.code;
       if (code === "ENOENT" || code === "ENOTDIR") {
-        return undefined;
+        return;
       }
-      // Storage/output errors must fail capture, not silently remove source text.
       if (code === "ENOSPC" || code === "EEXIST") {
         throw error;
       }
-      return missing(
-        name,
-        "head",
-        unknown,
-        `filesystem content unavailable: ${code ?? String(error)}`,
-      );
+      return missing(name, "head", unknown, `filesystem content unavailable: ${code ?? String(error)}`);
     }
   };
-
-  const files: FileInfo[] = [];
+  const files = [];
   const paths = [...new Set([...baseTree.keys(), ...headTree.keys()])].sort();
   for (const name of paths) {
     const before = baseTree.get(name);
     const after = headTree.get(name);
     const baseInfo = before ? fromObject(name, "base", before) : undefined;
-    let headInfo: BlobInfo | undefined;
+    let headInfo;
     if (after) {
       if (options.uncommitted && !options.staged) {
         headInfo = await workingFile(name, after);
@@ -1084,34 +823,33 @@ export async function capture(
     const status = fileStatus(baseInfo, headInfo);
     files.push({
       path: name,
-      ...(baseInfo ? { base: baseInfo } : {}),
-      ...(headInfo ? { head: headInfo } : {}),
-      status,
+      ...baseInfo ? { base: baseInfo } : {},
+      ...headInfo ? { head: headInfo } : {},
+      status
     });
   }
-
   Object.assign(scope, { capturedAt: new Date().toISOString(), unavailable });
-  const manifest: Manifest = {
+  const manifest = {
     schemaVersion: 1,
     repo,
     base,
     head,
-    ...(title ? { title } : {}),
-    ...(sourceUrl ? { sourceUrl } : {}),
+    ...title ? { title } : {},
+    ...sourceUrl ? { sourceUrl } : {},
     scope,
-    files,
+    files
   };
-  await fs.writeFile(path.join(out, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
-    flag: "wx",
+  await fs.writeFile(path.join(out, "manifest.json"), `${JSON.stringify(manifest, null, 2)}
+`, {
+    flag: "wx"
   });
   await fs.unlink(path.join(out, ".capture-in-progress"));
   return manifest;
 }
-
-export function parseArgs(args: string[]): CaptureOptions {
-  const options: Record<string, string | boolean> = {};
+function parseArgs(args) {
+  const options = {};
   const values = new Set(["repo", "out", "pr", "branch", "base", "commit", "range"]);
-  for (let i = 0; i < args.length; i++) {
+  for (let i = 0;i < args.length; i++) {
     const flag = args[i];
     if (!flag.startsWith("--")) {
       throw new Error(`Unexpected argument: ${flag}`);
@@ -1131,11 +869,10 @@ export function parseArgs(args: string[]): CaptureOptions {
       throw new Error(`Unknown option: ${flag}`);
     }
   }
-  const result = options as unknown as CaptureOptions;
+  const result = options;
   validateOptions(result);
   return result;
 }
-
 if (isMainModule(import.meta.url)) {
   try {
     requireSupportedRuntime();
@@ -1144,12 +881,16 @@ if (isMainModule(import.meta.url)) {
     } else {
       const options = parseArgs(process.argv.slice(2));
       const manifest = await capture(options);
-      process.stdout.write(
-        `Captured ${manifest.files.length} files to ${path.resolve(options.out, "manifest.json")}\n`,
-      );
+      process.stdout.write(`Captured ${manifest.files.length} files to ${path.resolve(options.out, "manifest.json")}
+`);
     }
   } catch (error) {
-    process.stderr.write(`capture: ${(error as Error).message}\n`);
+    process.stderr.write(`capture: ${error.message}
+`);
     process.exitCode = 1;
   }
 }
+export {
+  parseArgs,
+  capture
+};

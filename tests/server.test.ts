@@ -6,7 +6,7 @@ import { createServer } from "../skills/code-walkthrough/scripts/serve";
 
 test("local server exposes only packaged UI and captured files", async () => {
   const directory = await mkdtemp(join(tmpdir(), "walkthrough-server-"));
-  let server: ReturnType<typeof createServer> | undefined;
+  let server: Awaited<ReturnType<typeof createServer>> | undefined;
   try {
     const oid = "a".repeat(40);
     await mkdir(join(directory, "blobs"));
@@ -23,21 +23,32 @@ test("local server exposes only packaged UI and captured files", async () => {
     await Bun.write(join(directory, "lesson.json"), '{"schemaVersion":1,"steps":[]}');
     await Bun.write(join(directory, "blobs", oid + ".txt"), "hello");
     await Bun.write(join(directory, "private.txt"), "not served");
-    server = createServer(directory, 0);
+    server = await createServer(directory, 0);
     const url = `http://127.0.0.1:${server.port}`;
     const home = await fetch(url);
     expect(home.status).toBe(200);
     expect(await home.text()).toContain('src="/app.js"');
     expect(home.headers.get("content-security-policy")).toContain("script-src 'self'");
+    expect(home.headers.get("cache-control")).toBe("no-store");
+    expect(home.headers.get("x-content-type-options")).toBe("nosniff");
     expect((await fetch(url + "/app.js")).status).toBe(200);
     expect((await fetch(url + "/lesson.json")).status).toBe(200);
     expect(await (await fetch(url + "/blobs/" + oid + ".txt")).text()).toBe("hello");
+    const head = await fetch(url + "/blobs/" + oid + ".txt", { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-length")).toBe("5");
+    expect(await head.text()).toBe("");
     expect((await fetch(url + "/private.txt")).status).toBe(404);
     expect((await fetch(url + "/scripts/serve.ts")).status).toBe(404);
     expect((await fetch(url + "/blobs/" + "b".repeat(40) + ".txt")).status).toBe(404);
     expect((await fetch(url + "/lesson.json", { method: "POST", body: "{}" })).status).toBe(405);
+    await expect(createServer(directory, server.port)).rejects.toMatchObject({
+      code: "EADDRINUSE",
+    });
+    await rm(join(directory, "blobs", oid + ".txt"));
+    expect((await fetch(url + "/blobs/" + oid + ".txt")).status).toBe(404);
   } finally {
-    server?.stop(true);
+    await server?.stop(true);
     await rm(directory, { recursive: true, force: true });
   }
 });

@@ -1,5 +1,6 @@
-# Generated output is rebuilt from the maintained viewer source.
+# Generated output is rebuilt from maintained TypeScript and viewer source.
 skills/code-walkthrough/assets/
+skills/code-walkthrough/scripts/*.mjs
 
 # Captured example bytes must keep their recorded identities.
 skills/code-walkthrough/examples/

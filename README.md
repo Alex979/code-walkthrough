@@ -10,12 +10,14 @@ Context steps can start with an empty code pane or a selected source passage. Gu
 
 ## Quickstart
 
-Requirements: Bun 1.3 or newer and Git. For pull requests, also install GitHub CLI (`gh`) and authenticate it for the repository.
+Requirements: Node.js 22 or newer and Git. For pull requests, also install GitHub CLI (`gh`) and authenticate it for the repository. The skill ships prebuilt JavaScript and viewer assets: users do not need Bun, `npm install`, a TypeScript runner, or a build step.
+
+Before starting, check `node --version` and `git --version`; for PR capture, also check `gh auth status`. Run these checks in the environment where the agent executes commands. If Node is missing or older than 22, install a supported version from [nodejs.org](https://nodejs.org/en/download) or through your usual version manager, reopen the shell, and retry. An installed coding agent does not necessarily provide a usable `node` command.
 
 To try the bundled synthetic example immediately:
 
 ```sh
-bun skills/code-walkthrough/scripts/serve.ts skills/code-walkthrough/examples/greeting --port 4318
+node skills/code-walkthrough/scripts/serve.mjs skills/code-walkthrough/examples/greeting --port 4318
 ```
 
 The example demonstrates a blank introduction, partial edits, and returning to the same files to add behavior. Its repository label is portable; its source snapshots come from a tiny synthetic Git repository.
@@ -23,23 +25,25 @@ The example demonstrates a blank introduction, partial edits, and returning to t
 Run these commands from this repository's root. `PATH` is the repository to explain; `ARTIFACT` is a new output directory **outside that repository**.
 
 ```sh
-bun skills/code-walkthrough/scripts/capture.ts --repo PATH --out ARTIFACT --branch feature --base main
+node skills/code-walkthrough/scripts/capture.mjs --repo PATH --out ARTIFACT --branch feature --base main
 ```
 
 Author `ARTIFACT/lesson.json` using [the authoring contract](skills/code-walkthrough/references/authoring.md), [the writing guide](skills/code-walkthrough/references/writing.md), and the exact [TypeScript types](skills/code-walkthrough/scripts/types.ts). Capture produces `manifest.json` and source blobs; lesson authoring supplies the explanation and intermediate source states.
 
 ```sh
-bun skills/code-walkthrough/scripts/validate.ts ARTIFACT
-bun skills/code-walkthrough/scripts/serve.ts ARTIFACT --port 4317
+node skills/code-walkthrough/scripts/validate.mjs ARTIFACT
+node skills/code-walkthrough/scripts/serve.mjs ARTIFACT --port 4317
 ```
 
 Open the localhost URL printed by the server. The viewer is bundled with the skill, and the runtime has no third-party dependencies. Serving a lesson does not require rebuilding the viewer.
 
-For a quick HTTP check, request `/`, `/app.js`, `/styles.css`, `/manifest.json`, and `/lesson.json` on that URL. Captured text is available at `/blobs/<oid>.txt`. These checks confirm delivery, not browser layout or interaction. Stop a foreground server with Ctrl+C.
+For a quick HTTP check, request `/`, `/app.js`, `/styles.css`, `/manifest.json`, and `/lesson.json` on that URL. Captured text is available at `/blobs/<oid>.txt`. These checks confirm delivery, not browser layout or interaction. Keep the terminal open, or use your agent's supported background-process mechanism and retain its process/session identifier. Stop a foreground server with Ctrl+C; stop a background server through that mechanism. Restart it with the same serve command and artifact directory.
+
+The server listens on `127.0.0.1` only. If the agent runs in WSL, a remote machine, or a container, the reader's browser needs access to that environment's localhost through the platform's localhost integration or port forwarding. Agents that cannot keep a local server running need a different execution environment for this viewer.
 
 ## Choose the change
 
-All capture commands start with `bun skills/code-walkthrough/scripts/capture.ts --repo PATH --out ARTIFACT`:
+All capture commands start with `node skills/code-walkthrough/scripts/capture.mjs --repo PATH --out ARTIFACT`:
 
 | Scope arguments           | Meaning                                                                                      |
 | ------------------------- | -------------------------------------------------------------------------------------------- |
@@ -72,16 +76,18 @@ code-walkthrough/
 └── skills/code-walkthrough/         # Install this entire directory
     ├── SKILL.md
     ├── references/
-    ├── scripts/                    # Runtime tools and shared types
+    ├── scripts/                    # Prebuilt Node tools, TypeScript source, and shared types
     ├── assets/viewer/              # Compiled UI
     └── examples/
 ```
 
-With the user's permission, symlink or copy `skills/code-walkthrough/` into the chosen harness's skills directory as `code-walkthrough`. For Codex, that can be `$CODEX_HOME/skills/code-walkthrough` or `~/.codex/skills/code-walkthrough`. A copy of `SKILL.md` alone is insufficient: the runtime, bundled assets, types, and references must travel with it. When updating a copied installation, update the whole package together.
+With the user's permission, symlink or copy `skills/code-walkthrough/` into the chosen harness's skills directory as `code-walkthrough`. For Codex, that can be `$CODEX_HOME/skills/code-walkthrough` or `~/.codex/skills/code-walkthrough`; for Claude Code, `~/.claude/skills/code-walkthrough`. A copy of `SKILL.md` alone is insufficient: the runtime, bundled assets, types, and references must travel with it. When updating a copied installation, update the whole package together.
 
 There is no automatic global installation or publication. Optional harness-specific agent metadata is not required.
 
 ## Maintain the viewer
+
+Maintainers need Bun 1.3 or newer for builds, formatting, and tests, plus Node.js 22 or newer to verify the distributed tools.
 
 ```sh
 bun install --frozen-lockfile
@@ -89,6 +95,6 @@ bun run format
 bun run check
 ```
 
-`check` verifies formatting, rebuilds the packaged viewer, and runs the tests. Prettier is installed only for development; the standalone skill still needs no package installation. Generated assets and captured example files are excluded from formatting.
+`check` verifies formatting, rebuilds the packaged viewer and Node tools, and runs the tests. Prettier is installed only for development; the standalone skill still needs no package installation. Generated assets, Node bundles, and captured example files are excluded from formatting.
 
-Run maintenance commands from the repository root. Build after changing the viewer; the build writes directly to `skills/code-walkthrough/assets/viewer/`. Installations do not need `package.json`, viewer source, tests, or the build script. Tests and examples should use synthetic repositories. Keep the shared schema, validator, viewer, and authoring documentation aligned; see [AGENTS.md](AGENTS.md) for maintenance invariants.
+Run maintenance commands from the repository root. Edit the TypeScript source, then build after changing the runtime tools or viewer. The build writes the Node ESM bundles to `skills/code-walkthrough/scripts/*.mjs` and the viewer to `skills/code-walkthrough/assets/viewer/`; commit these generated outputs with their source changes. Installations do not need the root `package.json`, viewer source, tests, or the build script. Tests and examples should use synthetic repositories. Keep the shared schema, validator, viewer, and authoring documentation aligned; see [AGENTS.md](AGENTS.md) for maintenance invariants.
