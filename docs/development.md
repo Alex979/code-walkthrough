@@ -35,4 +35,4 @@ To enable deployment, open the repository's **Settings → Pages** and select **
 
 The [Pages workflow](../.github/workflows/pages.yml) publishes the committed viewer assets and bundled example on relevant pushes to `main`, or through its manual **Run workflow** action. Rebuild and commit viewer assets with source changes so deployments stay current. Only the packaged demo directory is uploaded.
 
-For `Alex979/code-walkthrough`, the demo URL is `https://alex979.github.io/code-walkthrough/`. Add it to the README once the first deployment succeeds.
+The live demo is at [abro.dev/code-walkthrough](https://abro.dev/code-walkthrough/), inheriting the account's custom Pages domain. The default `https://alex979.github.io/code-walkthrough/` address redirects there.

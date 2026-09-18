@@ -4,6 +4,8 @@ Reading a finished PR rarely gives you the same understanding as building it you
 
 Code walkthrough is an agent skill that reconstructs a change step by step, as if you were watching someone write it and explain the design as they go. Follow the implementation from its starting point to the finished change, at your own pace.
 
+[Try the live demo](https://abro.dev/code-walkthrough/)
+
 ## What you get
 
 - A guided walkthrough in your browser, with explanations alongside incremental code changes.
