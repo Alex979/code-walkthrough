@@ -554,6 +554,9 @@ function fullFileFocus(filePath, targetVersion, visibleLine, selection) {
 
 class ReadingMemory {
   positions = new Map;
+  clear() {
+    this.positions.clear();
+  }
   key(stepId, path, overview) {
     return JSON.stringify([stepId, overview ? "changes" : "file", overview ? "" : path]);
   }
@@ -581,6 +584,143 @@ class ReadingMemory {
   }
 }
 
+// viewer/src/chapters.ts
+function chapterRanges(lesson) {
+  const starts = (lesson.chapters ?? []).map((chapter) => ({
+    id: chapter.id,
+    title: chapter.title,
+    start: lesson.steps.findIndex((step) => step.id === chapter.start)
+  }));
+  return starts.map((chapter, index) => ({
+    ...chapter,
+    end: (starts[index + 1]?.start ?? lesson.steps.length) - 1
+  }));
+}
+function chapterAt(chapters, step) {
+  return chapters.find((chapter) => chapter.start <= step && step <= chapter.end);
+}
+
+// viewer/src/resume.ts
+function shouldResume(hash, savedHash, navigationType) {
+  const parameters = new URLSearchParams(hash.replace(/^#/, ""));
+  const explicit = ["step", "file", "view", "mode", "line", "symbol"].some((key) => parameters.has(key));
+  return !explicit || navigationType === "reload" && hash === savedHash;
+}
+async function resumeStorageKey(manifest, lesson) {
+  const content = new TextEncoder().encode(JSON.stringify([manifest, lesson]));
+  const digest = await crypto.subtle.digest("SHA-256", content);
+  const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `code-walkthrough:resume:v1:${hash}`;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function hasOnlyKeys(value, keys) {
+  return Object.keys(value).every((key) => keys.includes(key));
+}
+function isScroll(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+function isPosition(value, paths) {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    "path",
+    "version",
+    "mode",
+    "focus",
+    "scrollTop",
+    "scrollLeft",
+    "expandDiff"
+  ])) {
+    return false;
+  }
+  if (typeof value.path !== "string" || value.path !== "" && !paths.has(value.path)) {
+    return false;
+  }
+  if (!["base", "step", "head"].includes(value.version)) {
+    return false;
+  }
+  if (!["file", "changes", "diff"].includes(value.mode)) {
+    return false;
+  }
+  if (value.mode === "changes" && value.version !== "step") {
+    return false;
+  }
+  if (value.path === "" && (value.mode === "diff" || value.focus !== undefined)) {
+    return false;
+  }
+  if (!isScroll(value.scrollTop) || !isScroll(value.scrollLeft) || typeof value.expandDiff !== "boolean") {
+    return false;
+  }
+  if (value.focus !== undefined) {
+    if (!Array.isArray(value.focus) || value.focus.length !== 2 || !value.focus.every((line) => Number.isSafeInteger(line) && line >= 1) || value.focus[1] < value.focus[0]) {
+      return false;
+    }
+  }
+  return true;
+}
+function isResumeState(value, lesson, paths) {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    "stepId",
+    "position",
+    "guideScrollTop",
+    "tabs",
+    "positions",
+    "showFiles",
+    "showGuide"
+  ])) {
+    return false;
+  }
+  if (typeof value.stepId !== "string" || !lesson.steps.some((step) => step.id === value.stepId)) {
+    return false;
+  }
+  if (!isPosition(value.position, paths) || !isScroll(value.guideScrollTop) || typeof value.showFiles !== "boolean" || typeof value.showGuide !== "boolean") {
+    return false;
+  }
+  if (!Array.isArray(value.tabs) || value.tabs.length > paths.size || !value.tabs.every((path) => typeof path === "string" && path !== "" && paths.has(path)) || new Set(value.tabs).size !== value.tabs.length) {
+    return false;
+  }
+  if (!Array.isArray(value.positions) || value.positions.length > paths.size + 1 || !value.positions.every((position) => isPosition(position, paths))) {
+    return false;
+  }
+  const memories = new Set;
+  for (const position of value.positions) {
+    const key = position.mode === "changes" ? "changes" : `file:${position.path}`;
+    if (memories.has(key) || position.mode !== "changes" && !value.tabs.includes(position.path)) {
+      return false;
+    }
+    memories.add(key);
+  }
+  return true;
+}
+function loadResume(storage, key, lesson, paths) {
+  try {
+    const raw = storage.getItem(key);
+    if (!raw) {
+      return;
+    }
+    const envelope = JSON.parse(raw);
+    if (!isRecord(envelope) || !hasOnlyKeys(envelope, ["version", "state"]) || envelope.version !== 1 || !isResumeState(envelope.state, lesson, paths)) {
+      return;
+    }
+    return envelope.state;
+  } catch {
+    return;
+  }
+}
+function saveResume(storage, key, state) {
+  try {
+    storage.setItem(key, JSON.stringify({ version: 1, state }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+function clearResume(storage, key) {
+  try {
+    storage.removeItem(key);
+  } catch {}
+}
+
 // viewer/src/app.ts
 var root = document.querySelector("#app");
 var textCache = new Map;
@@ -605,6 +745,58 @@ var showGuide = true;
 var initialRender = true;
 var renderedSource = "";
 var readingMemory = new ReadingMemory;
+var chapters = [];
+var contentsOpen = false;
+var guideScrollTop = 0;
+var resumeKey = "";
+var resumeStorage;
+var resumeReady = false;
+var saveTimer;
+function currentPosition() {
+  const body = root.querySelector("#code-body");
+  return {
+    path,
+    version,
+    mode,
+    focus,
+    expandDiff,
+    scrollTop: body.scrollTop,
+    scrollLeft: body.scrollLeft
+  };
+}
+function persistResume() {
+  if (!resumeReady || !resumeStorage || renderedSource !== sourceIdentity()) {
+    return;
+  }
+  rememberPosition();
+  const positions = tabs.flatMap((filePath) => {
+    const position = readingMemory.file(steps2[step].id, filePath);
+    return position ? [position] : [];
+  });
+  const overview = readingMemory.overview(steps2[step].id);
+  if (overview) {
+    positions.push(overview);
+  }
+  if (!contentsOpen && showGuide) {
+    guideScrollTop = root.querySelector("#guide-content").scrollTop;
+  }
+  saveResume(resumeStorage, resumeKey, {
+    stepId: steps2[step].id,
+    position: currentPosition(),
+    guideScrollTop,
+    tabs: [...tabs],
+    positions,
+    showFiles,
+    showGuide
+  });
+}
+function scheduleResumeSave() {
+  if (!resumeReady) {
+    return;
+  }
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(persistResume, 200);
+}
 function sourceIdentity() {
   return JSON.stringify([step, version, mode, mode === "changes" ? "" : path, expandDiff]);
 }
@@ -732,7 +924,6 @@ function changeVersion(next) {
 }
 function renderShell() {
   const repositoryName = manifest.repo.split(/[\\/]/).at(-1) ?? manifest.repo;
-  const stepOptions = steps2.map((item, index) => `<option value="${index}">${index + 1}. ${escape(item.title)}</option>`).join("");
   root.innerHTML = `
     <a class="skip" href="#guide-title">Skip to walkthrough</a>
     <header class="topbar">
@@ -795,19 +986,29 @@ function renderShell() {
       </main>
       <aside class="guide-pane" aria-label="Step-by-step walkthrough">
         <div class="guide-top">
-          <div class="guide-heading"><span>Walkthrough</span>
+          <div class="guide-heading">
+            <button type="button" data-action="contents" aria-controls="lesson-contents" aria-expanded="false">☰ Contents</button>
             <button type="button" class="return-step" data-action="return" title="Restore this step’s starting view">↩ Return to step</button>
           </div>
-          <label>
-            <span class="sr-only">Choose a step</span>
-            <select id="step-select">${stepOptions}</select>
-          </label>
+          <div class="chapter-context">
+            <div id="chapter-title"></div>
+            <div id="chapter-progress"></div>
+          </div>
+          <div id="resume-notice" class="resume-notice" hidden>
+            <span id="resume-message" role="status"></span>
+            <button type="button" class="text-button" data-action="start-over">Start over</button>
+            <button type="button" class="dismiss-notice" data-action="dismiss-resume" aria-label="Dismiss resume notice">×</button>
+          </div>
         </div>
-        <div class="guide-content" id="guide-content"></div>
+        <div class="guide-reading">
+          <div class="guide-content" id="guide-content"></div>
+          <nav class="lesson-contents" id="lesson-contents" aria-label="Walkthrough contents" hidden></nav>
+        </div>
         <div class="guide-footer">
           <button type="button" data-action="back">← Back</button>
           <span id="step-count"></span>
           <button type="button" data-action="next">Next →</button>
+          <span id="next-chapter" hidden></span>
         </div>
       </aside>
     </div>
@@ -823,9 +1024,6 @@ function renderShell() {
   });
   root.querySelector("#version").addEventListener("change", (event) => {
     changeVersion(event.target.value);
-  });
-  root.querySelector("#step-select").addEventListener("change", (event) => {
-    goStep(Number(event.target.value));
   });
 }
 function renderTreeFile(node, indent) {
@@ -998,7 +1196,60 @@ function renderPart(part) {
     title="${title}"
   >${renderInline(part.label)}</a>`;
 }
+function contentsStep(index) {
+  return `<li><button type="button" data-step="${index}"
+    ${index === step ? 'aria-current="step"' : ""}>
+    <span class="contents-number">${index + 1}</span>
+    <span>${escape(steps2[index].title)}</span>
+  </button></li>`;
+}
+function renderContents() {
+  const current = chapterAt(chapters, step);
+  const outline = chapters.length ? chapters.map((chapter, index) => {
+    const chapterSteps = Array.from({ length: chapter.end - chapter.start + 1 }, (_, offset) => contentsStep(chapter.start + offset)).join("");
+    return `<details ${current?.id === chapter.id ? "open" : ""}>
+          <summary><span>${index + 1}. ${escape(chapter.title)}</span>
+            <small>${chapter.start === chapter.end ? `Step ${chapter.start + 1}` : `Steps ${chapter.start + 1}–${chapter.end + 1}`}</small>
+          </summary>
+          <button type="button" class="chapter-start" data-step="${chapter.start}"
+            aria-label="Start chapter ${index + 1}: ${escape(chapter.title)}">Start chapter →</button>
+          <ol>${chapterSteps}</ol>
+        </details>`;
+  }).join("") : `<ol>${steps2.map((_, index) => contentsStep(index)).join("")}</ol>`;
+  root.querySelector("#lesson-contents").innerHTML = `
+    <div class="contents-heading"><strong>Walkthrough contents</strong>
+      <button type="button" class="text-button" data-action="start-over">Start over</button>
+    </div>${outline}`;
+}
+function toggleContents(open = !contentsOpen) {
+  const guide = root.querySelector("#guide-content");
+  const outline = root.querySelector("#lesson-contents");
+  if (open && !contentsOpen) {
+    guideScrollTop = guide.scrollTop;
+    renderContents();
+  }
+  contentsOpen = open;
+  guide.hidden = open;
+  outline.hidden = !open;
+  const button = root.querySelector('[data-action="contents"]');
+  button.setAttribute("aria-expanded", String(open));
+  button.textContent = open ? "← Back to reading" : "☰ Contents";
+  if (open) {
+    const current = outline.querySelector('[aria-current="step"]');
+    const chapterHeading = current?.closest("details")?.querySelector("summary");
+    const target = chapterHeading ?? current;
+    target?.scrollIntoView({ block: "start" });
+    target?.focus({ preventScroll: true });
+  } else {
+    guide.scrollTop = guideScrollTop;
+    button.focus({ preventScroll: true });
+  }
+}
 function renderGuide() {
+  if (contentsOpen) {
+    toggleContents(false);
+  }
+  guideScrollTop = 0;
   guideLinks = [];
   const paragraphs = steps2[step].paragraphs.map((paragraph) => `<p>${paragraph.map(renderPart).join("")}</p>`).join("");
   root.querySelector("#guide-content").innerHTML = `
@@ -1006,11 +1257,18 @@ function renderGuide() {
     ${paragraphs}
   `;
   root.querySelector("#guide-content").scrollTop = 0;
-  root.querySelector("#step-select").value = String(step);
+  const chapter = chapterAt(chapters, step);
+  const chapterIndex = chapters.findIndex((item) => item === chapter);
+  root.querySelector("#chapter-title").textContent = chapter ? `${chapterIndex + 1}. ${chapter.title}` : "Walkthrough";
+  root.querySelector("#chapter-progress").textContent = chapter ? `Step ${step - chapter.start + 1} of ${chapter.end - chapter.start + 1} in this chapter · ${step + 1} of ${steps2.length} overall` : `Step ${step + 1} of ${steps2.length}`;
   root.querySelector("#step-count").textContent = `${step + 1} of ${steps2.length}`;
   root.querySelector('[data-action="back"]').disabled = step === 0;
   const next = root.querySelector('[data-action="next"]');
-  next.textContent = step === steps2.length - 1 ? "Start again" : "Next →";
+  const nextChapter = chapter && step === chapter.end ? chapters[chapterIndex + 1] : undefined;
+  next.textContent = step === steps2.length - 1 ? "Start again" : nextChapter ? "Next chapter →" : "Next →";
+  const transition = root.querySelector("#next-chapter");
+  transition.hidden = !nextChapter;
+  transition.textContent = nextChapter ? `Up next: ${nextChapter.title}` : "";
   root.querySelector("#announcement").textContent = `Step ${step + 1}: ${steps2[step].title}`;
 }
 function renderCodeRow(row, isDiff, filePath = path, selection = focus) {
@@ -1276,6 +1534,7 @@ async function renderCode(position = {}) {
     changeRegions = [];
     renderChangeNavigation();
     renderedSource = sourceKey;
+    scheduleResumeSave();
     return;
   }
   const selectedFile = files.get(path);
@@ -1403,6 +1662,10 @@ async function renderCode(position = {}) {
       class="text-button"
       data-action="retry"
     >Retry</button></p>`;
+  } finally {
+    if (ticket === requestId) {
+      scheduleResumeSave();
+    }
   }
 }
 async function openFile(filePath, target, record = true) {
@@ -1526,6 +1789,7 @@ async function openFullFile(button) {
 }
 async function goStep(index, record = true) {
   rememberPosition();
+  root.querySelector("#resume-notice").hidden = true;
   step = Math.max(0, Math.min(steps2.length - 1, index));
   renderedSource = "";
   const choice = defaultSelection(steps2[step]);
@@ -1562,6 +1826,18 @@ async function goStep(index, record = true) {
   }
   initialRender = false;
 }
+async function startOver() {
+  clearTimeout(saveTimer);
+  if (resumeStorage) {
+    clearResume(resumeStorage, resumeKey);
+  }
+  root.querySelector("#resume-notice").hidden = true;
+  tabs.length = 0;
+  readingMemory.clear();
+  renderedSource = "";
+  await goStep(0);
+  persistResume();
+}
 async function openRegion(index) {
   const region = changeRegions[index];
   if (!region) {
@@ -1595,6 +1871,10 @@ async function openRegion(index) {
 function handleClick(event) {
   const element = event.target.closest("button, a[data-source]");
   if (!element || element.disabled) {
+    return;
+  }
+  if (element.dataset.step !== undefined) {
+    goStep(Number(element.dataset.step));
     return;
   }
   if (element.dataset.closeFile) {
@@ -1646,8 +1926,21 @@ function handleClick(event) {
     return;
   }
   switch (element.dataset.action) {
+    case "contents":
+      toggleContents();
+      break;
+    case "start-over":
+      startOver();
+      break;
+    case "dismiss-resume":
+      root.querySelector("#resume-notice").hidden = true;
+      break;
     case "next":
-      goStep(step === steps2.length - 1 ? 0 : step + 1);
+      if (step === steps2.length - 1) {
+        startOver();
+      } else {
+        goStep(step + 1);
+      }
       break;
     case "back":
       goStep(step - 1);
@@ -1684,14 +1977,21 @@ function handleClick(event) {
       renderCode();
       break;
     case "files":
+      persistResume();
       showFiles = !showFiles;
       root.classList.toggle("hide-files", !showFiles);
       element.setAttribute("aria-pressed", String(showFiles));
+      scheduleResumeSave();
       break;
     case "guide":
+      persistResume();
       showGuide = !showGuide;
       root.classList.toggle("hide-guide", !showGuide);
       element.setAttribute("aria-pressed", String(showGuide));
+      if (showGuide && !contentsOpen) {
+        root.querySelector("#guide-content").scrollTop = guideScrollTop;
+      }
+      scheduleResumeSave();
       break;
   }
 }
@@ -1715,11 +2015,13 @@ async function restoreLocation() {
   if (!manifest) {
     return;
   }
+  root.querySelector("#resume-notice").hidden = true;
   const state = parseLocation(location.hash);
   rememberPosition();
   step = state.step;
   if (state.path === undefined && state.mode === undefined) {
-    goStep(step, false);
+    await goStep(step, false);
+    history.replaceState(null, "", makeLocation(step, path, version, focus, mode));
     return;
   }
   const choice = defaultSelection(steps2[step]);
@@ -1742,6 +2044,7 @@ async function restoreLocation() {
   renderGuide();
   if (await resolveLocationAnchor(state)) {
     await renderCode();
+    history.replaceState(null, "", makeLocation(step, path, version, focus, mode));
   }
 }
 async function initialize() {
@@ -1759,8 +2062,19 @@ async function initialize() {
     throw new Error("Unsupported or empty walkthrough. Run the validator.");
   }
   steps2 = lesson.steps;
+  chapters = chapterRanges(lesson);
   configureLesson(steps2);
   document.title = lesson.title + " · Code walkthrough";
+  files = new Map(manifest.files.map((file) => [file.path, file]));
+  try {
+    resumeKey = await resumeStorageKey(manifest, lesson);
+    resumeStorage = window.localStorage;
+  } catch {}
+  const saved = resumeStorage ? loadResume(resumeStorage, resumeKey, lesson, new Set(files.keys())) : undefined;
+  const savedStep = saved ? steps2.findIndex((item) => item.id === saved.stepId) : 0;
+  const savedHash = saved ? makeLocation(savedStep, saved.position.path, saved.position.version, saved.position.focus, saved.position.mode) : "";
+  const navigation = performance.getEntriesByType("navigation")[0];
+  const resumed = saved && shouldResume(location.hash, savedHash, navigation?.type) ? saved : undefined;
   const initial = parseLocation(location.hash);
   step = initial.step;
   const choice = defaultSelection(steps2[step]);
@@ -1768,12 +2082,21 @@ async function initialize() {
   version = initial.version ?? choice.version;
   focus = initial.focus;
   mode = initial.mode ?? (initial.path === undefined ? choice.mode : "file");
-  files = new Map(manifest.files.map((file) => [file.path, file]));
   if (path && !files.has(path)) {
     path = choice.path;
   }
   if (mode === "changes") {
     version = "step";
+  }
+  if (resumed) {
+    step = savedStep;
+    applyPosition(resumed.position);
+    tabs.push(...resumed.tabs);
+    for (const position of resumed.positions) {
+      readingMemory.save(resumed.stepId, position);
+    }
+    showFiles = resumed.showFiles;
+    showGuide = resumed.showGuide;
   }
   reconcileSelection();
   renderShell();
@@ -1781,16 +2104,42 @@ async function initialize() {
   renderTabs();
   renderGuide();
   root.classList.toggle("hide-files", !showFiles);
+  root.classList.toggle("hide-guide", !showGuide);
   root.querySelector('[data-action="files"]').setAttribute("aria-pressed", String(showFiles));
-  if (initial.path !== undefined || initial.mode !== undefined) {
+  root.querySelector('[data-action="guide"]').setAttribute("aria-pressed", String(showGuide));
+  if (resumed) {
+    root.querySelector("#resume-notice").hidden = false;
+    root.querySelector("#resume-message").textContent = `Resumed at step ${step + 1}`;
+    guideScrollTop = resumed.guideScrollTop;
+    root.querySelector("#guide-content").scrollTop = guideScrollTop;
+    history.replaceState(null, "", savedHash);
+    await renderCode({ ...resumed.position, reveal: false });
+    initialRender = false;
+  } else if (initial.path !== undefined || initial.mode !== undefined) {
     if (await resolveLocationAnchor(initial)) {
       await renderCode();
     }
   } else {
     await goStep(step, false);
   }
+  history.replaceState(null, "", makeLocation(step, path, version, focus, mode));
+  resumeReady = true;
+  scheduleResumeSave();
 }
 root.addEventListener("click", handleClick);
+root.addEventListener("click", scheduleResumeSave);
+root.addEventListener("scroll", scheduleResumeSave, true);
+root.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && contentsOpen) {
+    toggleContents(false);
+  }
+});
+window.addEventListener("pagehide", persistResume);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    persistResume();
+  }
+});
 window.addEventListener("hashchange", () => {
   restoreLocation();
 });

@@ -392,12 +392,58 @@ function validateManifestShape(value, errors) {
     }
   });
 }
+function validateChapters(value, steps, errors) {
+  if (!Array.isArray(value) || value.length === 0) {
+    errors.add("lesson.chapters: expected a nonempty array; omit chapters for an ungrouped lesson.");
+    return;
+  }
+  const stepPositions = new Map;
+  steps.forEach((step, index) => {
+    if (isObject(step) && typeof step.id === "string") {
+      stepPositions.set(step.id, index);
+    }
+  });
+  const ids = new Set;
+  let previousStart = -1;
+  value.forEach((chapter, index) => {
+    const at = `lesson.chapters[${index}]`;
+    if (!isObject(chapter)) {
+      errors.add(`${at}: expected a Chapter object.`);
+      return;
+    }
+    validateKeys(chapter, ["id", "title", "start"], at, errors);
+    for (const field of ["id", "title", "start"]) {
+      validateRequiredText(chapter[field], `${at}.${field}`, errors);
+    }
+    if (typeof chapter.id === "string") {
+      if (ids.has(chapter.id)) {
+        errors.add(`${at}.id: duplicate chapter ID ${JSON.stringify(chapter.id)}.`);
+      }
+      ids.add(chapter.id);
+    }
+    if (!isNonemptyString(chapter.start)) {
+      return;
+    }
+    const start = stepPositions.get(chapter.start);
+    if (start === undefined) {
+      errors.add(`${at}.start: unknown step ID ${JSON.stringify(chapter.start)}.`);
+      return;
+    }
+    if (index === 0 && start !== 0) {
+      errors.add(`${at}.start: the first chapter must begin at the lesson's first step.`);
+    }
+    if (start <= previousStart) {
+      errors.add(`${at}.start: chapters must begin at distinct steps in increasing lesson order.`);
+    }
+    previousStart = start;
+  });
+}
 function validateLessonShape(value, errors) {
   if (!isObject(value)) {
     errors.add("lesson.json: expected an object.");
     return;
   }
-  validateKeys(value, ["schemaVersion", "title", "steps"], "lesson.json", errors);
+  validateKeys(value, ["schemaVersion", "title", "steps", "chapters"], "lesson.json", errors);
   if (value.schemaVersion !== 1) {
     errors.add("lesson.schemaVersion: expected 1.");
   }
@@ -405,6 +451,9 @@ function validateLessonShape(value, errors) {
   if (!Array.isArray(value.steps) || value.steps.length === 0) {
     errors.add("lesson.steps: expected a nonempty array.");
     return;
+  }
+  if ("chapters" in value) {
+    validateChapters(value.chapters, value.steps, errors);
   }
   const ids = new Set;
   value.steps.forEach((step, index) => {

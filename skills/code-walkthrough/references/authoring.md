@@ -16,7 +16,26 @@ The manifest's paths define the allowed file universe for changes, step targets,
 
 ## Lesson and step fields
 
-The lesson contains `schemaVersion: 1`, `title`, and `steps`. There is no separate `chapters` field. Express chapters through step titles and narrative progression while retaining one cumulative lesson.
+The lesson contains `schemaVersion: 1`, `title`, and `steps`, with optional `chapters` for a longer lesson. Small lessons can omit chapters.
+
+Each chapter names a meaningful phase of the build and refers to its first step by ID:
+
+```json
+{
+  "chapters": [
+    { "id": "greeting", "title": "Build the greeting", "start": "baseline" },
+    { "id": "input", "title": "Handle surrounding spaces", "start": "trim-name" }
+  ]
+}
+```
+
+This is a shape example; each `start` must name an existing step in the lesson. A chapter requires a unique, nonempty `id`, a nonempty `title`, and a nonempty `start`. If provided, `chapters` must be nonempty, its first chapter must start at the first step, and subsequent starts must follow strictly increasing step order. A chapter continues until the next chapter starts, or until the lesson ends. Every step therefore belongs to exactly one chapter; there are no overlapping ranges or separate end fields.
+
+Name chapters for what the reader builds or learns, rather than file names or arbitrary batches of steps. Use enough steps to form a useful phase without splitting every small edit into a chapter. Chapter boundaries organize the existing cumulative sequence: jumping ahead still applies all preceding changes. Do not reset source, reorder steps just for the outline, duplicate edits, or add mandatory divider steps. Next continues directly into the next chapter. Explain connections in the relevant step's prose rather than relying on the chapter title alone.
+
+The viewer uses chapters for its contents outline and current-position labels. These show location, not completion or understanding. Reading position is saved locally by the viewer; it is not authored in `lesson.json`.
+
+Reopening the same localhost address in the same browser resumes the step, explanation scroll, source tabs, active source selection and scroll, and pane visibility. Explicit step/source links take priority; refreshing the current saved location preserves its scroll. Start over returns to the first step and clears saved source exploration. Resume is optional browser storage, not account sync; clearing storage, changing browser or port, or editing the capture or lesson starts a new reading position. Return to step restores the authored code view without restarting the lesson.
 
 | Step field        | Contract                                                                                                                                      |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |

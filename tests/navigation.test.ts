@@ -95,4 +95,6 @@ test("later selection mutations cannot alter the saved reading position", () => 
   expect(restored.focus).toEqual([2, 4]);
   restored.focus![1] = 100;
   expect(memory.file("one", "file.ts")?.focus).toEqual([2, 4]);
+  memory.clear();
+  expect(memory.file("one", "file.ts")).toBeUndefined();
 });

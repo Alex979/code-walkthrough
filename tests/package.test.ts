@@ -124,6 +124,7 @@ test("copied and linked packages run the Node CLI without Bun, TypeScript or the
       const lesson: Lesson = {
         schemaVersion: 1,
         title: "Add a greeting",
+        chapters: [{ id: "greeting", title: "Build the greeting", start: "greeting" }],
         steps: [
           {
             id: "greeting",

@@ -90,6 +90,73 @@ function opaque(kind: "binary" | "large" | "unavailable", digit = "a", mode = "1
   return { oid: digit.repeat(40), size: 42, kind, mode };
 }
 
+describe("lesson chapters", () => {
+  test("accepts contiguous chapter starts without changing cumulative validation", async () => {
+    const f = await fixture();
+    f.lesson.steps = [
+      step({ id: "baseline", changes: {} }),
+      step({ id: "intermediate", changes: { "main.ts": { text: "const answer = 3;\n" } } }),
+      step(),
+    ];
+    f.lesson.chapters = [
+      { id: "context", title: "Understand the starting behavior", start: "baseline" },
+      { id: "build", title: "Change the answer", start: "intermediate" },
+    ];
+    expect(await f.run()).toEqual({ ok: true, files: 1, steps: 3, textBlobs: 2 });
+    delete f.lesson.chapters;
+    expect(await f.run()).toEqual({ ok: true, files: 1, steps: 3, textBlobs: 2 });
+  });
+
+  test("accepts a single chapter and keeps chapter IDs independent of step IDs", async () => {
+    const f = await fixture();
+    f.lesson.chapters = [{ id: "finish", title: "Build the change", start: "finish" }];
+    expect((await f.run()).ok).toBe(true);
+  });
+
+  test.each([
+    [null, "expected a nonempty array"],
+    [{}, "expected a nonempty array"],
+    [[], "expected a nonempty array"],
+    [[null], "expected a Chapter object"],
+    [[{}], ".id: expected a nonempty string"],
+    [[{ id: "", title: "Build", start: "finish" }], ".id: expected a nonempty string"],
+    [[{ id: "build", title: " ", start: "finish" }], ".title: expected a nonempty string"],
+    [[{ id: "build", title: "Build", start: 0 }], ".start: expected a nonempty string"],
+    [[{ id: "build", title: "Build", start: "absent" }], 'unknown step ID "absent"'],
+    [[{ id: "build", title: "Build", start: "finish", end: "finish" }], 'unknown key "end"'],
+  ])("rejects malformed chapter data %#", async (chapters, expected) => {
+    const f = await fixture();
+    Object.assign(f.lesson, { chapters });
+    await problems(f.run, expected as string);
+  });
+
+  test("rejects duplicate chapter IDs and repeated starts", async () => {
+    const f = await fixture();
+    f.lesson.chapters = [
+      { id: "build", title: "Build", start: "finish" },
+      { id: "build", title: "Again", start: "finish" },
+    ];
+    await problems(f.run, "duplicate chapter ID", "distinct steps in increasing lesson order");
+  });
+
+  test("rejects chapters that omit the first step or go backward", async () => {
+    const f = await fixture();
+    f.lesson.steps = [step({ id: "baseline", changes: {} }), step()];
+    f.lesson.chapters = [
+      { id: "build", title: "Build", start: "finish" },
+      { id: "context", title: "Starting point", start: "baseline" },
+    ];
+    await problems(f.run, "must begin at the lesson's first step", "increasing lesson order");
+  });
+
+  test("chapter boundaries cannot replace missing construction work", async () => {
+    const f = await fixture();
+    f.lesson.steps[0].changes = {};
+    f.lesson.chapters = [{ id: "build", title: "Build the change", start: "finish" }];
+    await problems(f.run, "text differs from head bytes");
+  });
+});
+
 describe("presentation preflight", () => {
   test("prepares scattered changes in a large cumulative file and excludes opaque assets", async () => {
     const f = await fixture();

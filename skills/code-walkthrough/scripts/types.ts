@@ -77,8 +77,19 @@ export interface Step {
   changes?: Record<string, Change>;
 }
 
+/** A contiguous build phase; its end is the next chapter's start or the lesson's end. */
+export interface Chapter {
+  /** Stable, unique chapter identifier, independent of step IDs. */
+  id: string;
+  title: string;
+  /** ID of the first step in this chapter. Chapters follow step order and begin at step one. */
+  start: string;
+}
+
 export interface Lesson {
   schemaVersion: 1;
   title: string;
   steps: Step[];
+  /** Optional, nonempty outline for longer lessons. Does not change cumulative source states. */
+  chapters?: Chapter[];
 }

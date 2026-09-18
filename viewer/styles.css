@@ -759,9 +759,8 @@ button:hover {
   margin-bottom: 9px;
 }
 
-.guide-heading > span {
+.guide-heading > button:first-child {
   font-size: 12px;
-  color: var(--muted);
 }
 
 .return-step {
@@ -774,15 +773,138 @@ button:hover {
   padding: 5px 9px;
 }
 
-.guide-top select {
-  max-width: 100%;
-  width: 100%;
-  background: var(--bg);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 6px;
+.chapter-context {
+  min-width: 0;
+}
+
+#chapter-title {
+  font-weight: 600;
   font-size: 13px;
+}
+
+#chapter-progress {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.resume-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.resume-notice[hidden] {
+  display: none;
+}
+
+.dismiss-notice {
+  margin-left: auto;
+  padding: 0 5px;
+  border: 0;
+  font-size: 18px;
+}
+
+.guide-reading {
+  display: grid;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.guide-reading > [hidden] {
+  display: none;
+}
+
+.lesson-contents {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 12px 24px;
+}
+
+.contents-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 5px 14px;
+  font-size: 12px;
+}
+
+.lesson-contents details {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0;
+}
+
+.lesson-contents summary {
+  cursor: pointer;
+  padding: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 4px;
+}
+
+.lesson-contents summary:hover {
+  background: var(--hover);
+}
+
+.lesson-contents summary:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+
+.lesson-contents summary small {
+  display: block;
+  margin: 4px 0 0 18px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.chapter-start {
+  margin: 5px 0 8px 24px;
+  font-size: 12px;
+}
+
+.lesson-contents ol {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.lesson-contents li button {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 9px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  font-size: 13px;
+}
+
+.lesson-contents li button:hover {
+  background: var(--hover);
+}
+
+.lesson-contents [aria-current="step"] {
+  background: var(--selected);
+  box-shadow: inset 3px 0 var(--blue);
+  font-weight: 600;
+}
+
+.contents-number {
+  flex: 0 0 25px;
+  text-align: right;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .guide-content {
@@ -831,12 +953,18 @@ button:hover {
 
 .guide-footer {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 17px 18px;
   border-top: 1px solid var(--border);
   background: var(--surface);
+}
+
+#next-chapter {
+  flex-basis: 100%;
+  font-size: 11px;
 }
 
 .guide-footer > span {
@@ -968,7 +1096,8 @@ button:hover {
   }
 
   .guide-top {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
     gap: 12px;
     padding: 8px 15px;
@@ -978,13 +1107,9 @@ button:hover {
     margin: 0;
   }
 
-  .guide-heading > span {
-    display: none;
-  }
-
-  .guide-top > label {
-    min-width: 0;
-    flex: 1;
+  .resume-notice {
+    grid-column: 1 / -1;
+    margin-top: 0;
   }
 
   .guide-content {
@@ -1043,6 +1168,11 @@ button:hover {
 }
 
 @media (max-width: 560px) {
+  .guide-top {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
   .topbar {
     flex-wrap: wrap;
     min-height: 78px;

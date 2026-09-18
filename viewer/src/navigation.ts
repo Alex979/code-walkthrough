@@ -51,6 +51,10 @@ export interface ReadingPosition {
 export class ReadingMemory {
   private positions = new Map<string, ReadingPosition>();
 
+  clear(): void {
+    this.positions.clear();
+  }
+
   private key(stepId: string, path: string, overview: boolean): string {
     return JSON.stringify([stepId, overview ? "changes" : "file", overview ? "" : path]);
   }
