@@ -7,3 +7,6 @@ skills/code-walkthrough/examples/
 
 # Managed by Bun.
 bun.lock
+
+# Packaged static demo.
+dist/

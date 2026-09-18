@@ -215,7 +215,7 @@ async function readBlob(file: FileInfo, version: "base" | "head"): Promise<strin
   }
 
   if (!textCache.has(info.oid)) {
-    const pendingText = fetch(`/blobs/${info.oid}.txt`)
+    const pendingText = fetch(`./blobs/${info.oid}.txt`)
       .then(async (response) => {
         if (!response.ok) {
           throw new Error(`Could not read ${file.path} (${response.status}).`);
@@ -1864,13 +1864,13 @@ async function restoreLocation(): Promise<void> {
 }
 
 async function initialize(): Promise<void> {
-  const response = await fetch("/manifest.json");
+  const response = await fetch("./manifest.json");
   if (!response.ok) {
     throw new Error(`Could not load the repository snapshot (${response.status}).`);
   }
   manifest = (await response.json()) as Manifest;
 
-  const lessonResponse = await fetch("/lesson.json");
+  const lessonResponse = await fetch("./lesson.json");
   if (!lessonResponse.ok) {
     throw new Error("Could not load lesson.json.");
   }

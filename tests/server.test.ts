@@ -27,7 +27,7 @@ test("local server exposes only packaged UI and captured files", async () => {
     const url = `http://127.0.0.1:${server.port}`;
     const home = await fetch(url);
     expect(home.status).toBe(200);
-    expect(await home.text()).toContain('src="/app.js"');
+    expect(await home.text()).toContain('src="./app.js"');
     expect(home.headers.get("content-security-policy")).toContain("script-src 'self'");
     expect(home.headers.get("cache-control")).toBe("no-store");
     expect(home.headers.get("x-content-type-options")).toBe("nosniff");

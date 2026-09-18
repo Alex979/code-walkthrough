@@ -8,6 +8,7 @@
     "format:check": "prettier --check .",
     "check": "bun run format:check && bun run build && bun test",
     "build": "bun scripts/build.ts",
+    "build:demo": "bun scripts/package-demo.ts",
     "test": "bun test",
     "validate": "node skills/code-walkthrough/scripts/validate.mjs"
   },

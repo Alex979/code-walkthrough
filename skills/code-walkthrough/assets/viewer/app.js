@@ -1078,7 +1078,7 @@ async function readBlob(file, version2) {
     return;
   }
   if (!textCache.has(info.oid)) {
-    const pendingText = fetch(`/blobs/${info.oid}.txt`).then(async (response) => {
+    const pendingText = fetch(`./blobs/${info.oid}.txt`).then(async (response) => {
       if (!response.ok) {
         throw new Error(`Could not read ${file.path} (${response.status}).`);
       }
@@ -2399,12 +2399,12 @@ async function restoreLocation() {
   }
 }
 async function initialize() {
-  const response = await fetch("/manifest.json");
+  const response = await fetch("./manifest.json");
   if (!response.ok) {
     throw new Error(`Could not load the repository snapshot (${response.status}).`);
   }
   manifest = await response.json();
-  const lessonResponse = await fetch("/lesson.json");
+  const lessonResponse = await fetch("./lesson.json");
   if (!lessonResponse.ok) {
     throw new Error("Could not load lesson.json.");
   }
